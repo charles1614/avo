@@ -138,6 +138,14 @@ def test_resume_continues_without_duplicates(project):
     assert summary["tokens"] > FakeLLM([]).usage.total_tokens
 
 
+def test_run_dir_lock_rejects_second_controller(project):
+    script = [[set_value("2.0")], [tool_use("submit", "s1", message="b2")]]
+    ctrl = Controller(make_config(), FakeLLM(script), project_root=project)
+    with pytest.raises(RuntimeError, match="already running"):
+        Controller(make_config(), FakeLLM([]), project_root=project,
+                   run_dir=ctrl.run_dir)
+
+
 def test_seed_eval_is_cached_for_identical_content(project):
     script = [[set_value("2.0")], [tool_use("submit", "s1", message="b2")]]
     ctrl = Controller(make_config(), FakeLLM(script), project_root=project)

@@ -12,7 +12,9 @@ State is persisted after every step so a killed run resumes cleanly.
 from __future__ import annotations
 
 import datetime
+import fcntl
 import json
+import os
 import time
 from pathlib import Path
 
@@ -85,6 +87,18 @@ class Controller:
         self.state_path = self.run_dir / "state.json"
         self.logs_dir = self.run_dir / "logs"
         self.logs_dir.mkdir(exist_ok=True)
+
+        # Exactly one controller per run dir: two agents racing in the same
+        # workspace corrupt each other's commits. Lock held for process life.
+        self._lock_file = open(self.run_dir / ".lock", "w")
+        try:
+            fcntl.flock(self._lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            raise RuntimeError(
+                f"another controller is already running on {self.run_dir} "
+                "(runs/<id>/.lock is held); stop it before resuming") from None
+        self._lock_file.write(str(os.getpid()))
+        self._lock_file.flush()
 
         self.runner = make_runner(config.runner, self.run_dir.name)
         self.cache = EvalCache(self.run_dir / "evals")
@@ -327,5 +341,7 @@ class Controller:
         }
         (self.run_dir / "summary.json").write_text(json.dumps(summary, indent=1))
         self._save_state()
+        fcntl.flock(self._lock_file, fcntl.LOCK_UN)
+        self._lock_file.close()
         log(f"[avo] done: {json.dumps(summary)}")
         return summary
