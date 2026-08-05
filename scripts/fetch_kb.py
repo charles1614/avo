@@ -80,6 +80,9 @@ def main() -> int:
     ap.add_argument("--ref", default=None, help="tag/commit to fetch (default: HEAD)")
     ap.add_argument("--dest", default="knowledge_base/external")
     ap.add_argument("--only", choices=list(REPOS), default=None)
+    ap.add_argument("--from-manifest", action="store_true",
+                    help="restore the exact commits recorded in MANIFEST.json "
+                         "(reproducible KB on a fresh clone)")
     args = ap.parse_args()
     dest = Path(args.dest)
     dest.mkdir(parents=True, exist_ok=True)
@@ -87,7 +90,14 @@ def main() -> int:
     for name, spec in REPOS.items():
         if args.only and name != args.only:
             continue
-        entry = fetch_repo(name, spec, dest, args.ref)
+        ref = args.ref
+        if args.from_manifest:
+            pinned = manifest.get(name, {}).get("commit")
+            if not pinned:
+                print(f"{name}: no pinned commit in MANIFEST.json; skipping")
+                continue
+            ref = pinned
+        entry = fetch_repo(name, spec, dest, ref)
         if entry:
             manifest[name] = entry
     save_manifest(dest, manifest)
