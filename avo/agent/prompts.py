@@ -27,7 +27,11 @@ correct AND score >= {best_score:.4f} (the current best committed score).
   incremental improvements — a committed +10% beats an uncommitted +50%.
 - `evaluate` EARLY (including the unmodified workspace, to see the scoring
   output format) and often; do not perfect a large change without evaluating.
-- Use kb_search/kb_read before nontrivial hardware-specific work.
+- Use kb_search/kb_read before nontrivial hardware-specific work, but budget
+  research: start implementing before half your turns are spent.
+- Large files: never emit more than ~150 lines in one write_file/edit_file
+  call — the arguments get truncated past the output-token limit and the
+  whole call is lost. Write a skeleton, then extend with multiple edits.
 - Budget: {max_turns} turns and {max_evals} evaluations this step. Commit a
   verified improvement well before you run out.
 {gpu_sheet}\

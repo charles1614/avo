@@ -73,6 +73,13 @@ class VariationAgent:
             for tu in tool_uses:
                 if tu.parse_error:
                     outcome_content, is_error, signal = tu.parse_error, True, None
+                    if turn.stop_reason == "max_tokens":
+                        outcome_content = (
+                            "Your tool call was TRUNCATED by the output-token "
+                            "limit before the arguments finished. Do not retry "
+                            "the same call. Split the work: write_file a short "
+                            "skeleton first, then extend it with several "
+                            "edit_file calls of at most ~150 lines each.")
                 else:
                     o = self.registry.dispatch(tu.name, tu.input)
                     outcome_content, is_error, signal = o.content, o.is_error, o.signal
