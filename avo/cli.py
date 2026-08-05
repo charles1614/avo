@@ -112,18 +112,28 @@ def cmd_baselines(args) -> int:
     return 0
 
 
+def _latest_run(root: Path) -> Path | None:
+    runs = [p for p in (root / "runs").glob("*") if (p / "lineage.jsonl").exists()]
+    return max(runs, key=lambda p: p.stat().st_mtime) if runs else None
+
+
 def cmd_dashboard(args) -> int:
     from avo.report.dashboard import build, watch
-    run_dir = Path(args.run)
+    run_dir = Path(args.run) if args.run else _latest_run(Path(args.root))
+    if run_dir is None:
+        print("no runs found under runs/ — pass --run explicitly")
+        return 1
     baselines = Path(args.baselines) if args.baselines else None
+    out = build(run_dir, baselines, refresh_s=args.watch)
+    print(f"[avo] dashboard: {out}")
+    if args.open:
+        import webbrowser
+        webbrowser.open(out.resolve().as_uri())
     if args.watch:
         try:
             watch(run_dir, baselines, interval_s=args.watch)
         except KeyboardInterrupt:
             pass
-        return 0
-    out = build(run_dir, baselines)
-    print(f"[avo] dashboard written to {out}")
     return 0
 
 
@@ -180,10 +190,12 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("dashboard",
                        help="self-contained HTML dashboard for a run (no LLM)")
-    p.add_argument("--run", required=True)
+    p.add_argument("--run", help="run directory (default: latest under runs/)")
     p.add_argument("--baselines", help="baseline JSON path (default: latest)")
     p.add_argument("--watch", type=int, metavar="SECONDS",
                    help="regenerate every N seconds; page auto-reloads")
+    p.add_argument("--open", action="store_true",
+                   help="open the dashboard in the default browser")
     p.set_defaults(fn=cmd_dashboard)
 
     p = sub.add_parser("report", help="render lineage table + plot (no LLM)")
