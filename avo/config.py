@@ -18,6 +18,10 @@ class LLMConfig(BaseModel):
     api_key_env: str | None = None
     max_tokens: int = 8192
     temperature: float | None = None  # None = provider default
+    # Provider-specific request fields passed through verbatim, e.g. DeepSeek
+    # thinking: {"thinking": {"type": "enabled"}, "reasoning_effort": "high"}
+    # or Anthropic {"thinking": {"type": "enabled", "budget_tokens": 8000}}.
+    extra_body: dict = Field(default_factory=dict)
     # USD per million tokens; required (non-zero) for max_usd to mean anything.
     price_input_per_mtok: float = 0.0
     price_output_per_mtok: float = 0.0

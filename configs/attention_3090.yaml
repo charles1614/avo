@@ -7,7 +7,11 @@ llm:
   model: deepseek-v4-flash
   base_url: https://api.deepseek.com
   api_key_env: DEEPSEEK_API_KEY
-  max_tokens: 8192
+  max_tokens: 16384          # headroom for reasoning + large tool calls
+  extra_body:                # thinking mode (probe-verified on v4-flash)
+    thinking:
+      type: enabled
+    reasoning_effort: high
   # deepseek-v4-flash cache-miss rates (api-docs.deepseek.com, 2026-08)
   price_input_per_mtok: 0.14
   price_output_per_mtok: 0.28

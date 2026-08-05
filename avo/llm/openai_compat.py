@@ -102,6 +102,8 @@ class OpenAICompatClient(LLMClient):
             kwargs["tools"] = to_openai_tools(tools)
         if self.cfg.temperature is not None:
             kwargs["temperature"] = self.cfg.temperature
+        if self.cfg.extra_body:
+            kwargs["extra_body"] = self.cfg.extra_body
         resp = self._client.chat.completions.create(**kwargs)
         turn = parse_openai_choice(resp.model_dump())
         self.usage.add(turn.usage)

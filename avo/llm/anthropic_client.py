@@ -69,6 +69,7 @@ class AnthropicClient(LLMClient):
             kwargs["tools"] = to_anthropic_tools(tools)
         if self.cfg.temperature is not None:
             kwargs["temperature"] = self.cfg.temperature
+        kwargs.update(self.cfg.extra_body)  # e.g. thinking config
         resp = self._client.messages.create(**kwargs)
         turn = parse_anthropic_response(resp.model_dump())
         self.usage.add(turn.usage)
