@@ -33,12 +33,18 @@ task_params:
   warmup: 10
   repeats: 30
   arch_flags: ["-gencode", "arch=compute_86,code=sm_86"]
+  # `evaluate quick=true`: reduced grid for fast inner-loop iteration;
+  # submit always re-scores the full grid
+  quick_overrides:
+    seqlens: [1024, 4096]
+    repeats: 10
+    warmup: 5
 budgets:
   max_versions: 10
   max_steps: 30
   max_wall_clock_s: 43200
-  max_turns_per_step: 40
-  max_evals_per_step: 8
+  max_turns_per_step: 60
+  max_evals_per_step: 12
   max_usd: 5.0
   max_total_tokens: 20000000
 supervisor:

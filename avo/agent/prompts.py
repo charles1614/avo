@@ -47,15 +47,18 @@ Current best committed score: {best_score:.4f} ({best_version})
 
 ## Previous step outcome
 {prev_outcome}
-{supervisor_block}\
+{prev_patch_block}{supervisor_block}\
 Produce and submit the next committed version.\
 """
 
 FAILURE_SUMMARY_PROMPT = """\
 A variation step just ended without a committed improvement. Summarize it in
-at most 150 words for the next attempt: what was attempted, why it failed
+at most 300 words for the next attempt: what was attempted, why it failed
 (compile error / correctness / performance regression / budget exhausted), and
-what to avoid or retry differently. Be concrete.
+what to avoid or retry differently. PRESERVE anything worth reusing — design
+decisions, tile/layout choices, working code fragments — quote them verbatim;
+the next attempt starts from a clean workspace and this summary plus the diff
+below are all it inherits.
 
 ## Final uncommitted diff
 {diff}
@@ -102,16 +105,23 @@ def build_system_prompt(brief: str, best_score: float, max_turns: int,
 
 
 def build_step_prompt(entries: list[LineageEntry], last_diff: str,
-                      prev_outcome: str, supervisor_guidance: str) -> str:
+                      prev_outcome: str, supervisor_guidance: str,
+                      prev_patch: str = "") -> str:
     best = max(entries, key=lambda e: e.score) if entries else None
     sup = ""
     if supervisor_guidance:
         sup = f"\n## SUPERVISOR GUIDANCE\n{supervisor_guidance}\n\n"
+    patch = ""
+    if prev_patch.strip():
+        patch = ("\n### Uncommitted diff of that failed attempt "
+                 "(reusable starting material — the workspace was reset)\n"
+                 f"```diff\n{prev_patch}\n```\n")
     return STEP_USER.format(
         lineage_table=lineage_table(entries),
         best_score=best.score if best else 0.0,
         best_version=best.version if best else "n/a",
         last_diff=last_diff or "(seed version — no diff yet)",
         prev_outcome=prev_outcome or "(this is the first variation step)",
+        prev_patch_block=patch,
         supervisor_block=sup,
     )

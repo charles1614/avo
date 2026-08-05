@@ -126,9 +126,14 @@ class Controller:
 
     # -- evaluation ---------------------------------------------------------------
 
-    def evaluate_workspace(self, fresh: bool = False) -> ScoreResult:
+    def evaluate_workspace(self, fresh: bool = False,
+                           quick: bool = False) -> ScoreResult:
         harness = self.task_dir / self.task.harness_dir
-        key = eval_key(self.lineage.workspace, harness, self.config.task_params,
+        task_params = dict(self.config.task_params)
+        overrides = task_params.pop("quick_overrides", None)
+        if quick and overrides:
+            task_params.update(overrides)
+        key = eval_key(self.lineage.workspace, harness, task_params,
                        self.runner.identity())
         if not fresh:
             hit = self.cache.get(key)
@@ -137,7 +142,7 @@ class Controller:
         # Correctness data seed derived from the content hash: any code change
         # shifts the test data unpredictably (no hardcoding outputs), while
         # identical code keeps a stable seed (cache stays meaningful).
-        params = {**self.config.task_params, "rng_seed": int(key[:12], 16) % (2**31)}
+        params = {**task_params, "rng_seed": int(key[:12], 16) % (2**31)}
         result = self.runner.score(self.lineage.workspace, harness,
                                    self.task.score_entry, params)
         if cacheable(result):
@@ -223,9 +228,14 @@ class Controller:
             self.config.gpu_sheet)
         prev = (self.state["failure_summaries"][-1]
                 if self.state["failure_summaries"] else "")
+        prev_patch = ""
+        if prev:  # previous step failed: hand its actual diff to this attempt
+            patch_file = self.logs_dir / f"step_{step - 1:04d}_final.patch"
+            if patch_file.exists():
+                prev_patch = patch_file.read_text()[:8000]
         step_prompt = build_step_prompt(self.lineage.entries(),
                                         self.lineage.last_commit_diff(),
-                                        prev, guidance)
+                                        prev, guidance, prev_patch=prev_patch)
 
         log(f"[avo] step {step}: starting variation (best={best_score:.4f})")
         try:

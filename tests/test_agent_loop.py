@@ -15,7 +15,7 @@ def build_agent(tmp_path, script, max_evals=4, max_turns=6, gate_pass=True):
     (ws / "f.py").write_text("x = 1\n")
     ctx = ToolContext(
         workspace=ws, kb=KnowledgeBase([]),
-        evaluate_fn=lambda: ScoreResult(correct=True, score=2.0),
+        evaluate_fn=lambda quick=False: ScoreResult(correct=True, score=2.0),
         submit_fn=lambda msg: (gate_pass, "ACCEPTED" if gate_pass else "REJECTED"),
         max_evals=max_evals)
     llm = FakeLLM(script)

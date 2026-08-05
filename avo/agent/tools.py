@@ -106,8 +106,10 @@ class ToolRegistry:
                   ["path"]),
             _spec("evaluate",
                   "Score the current workspace: correctness check then benchmark. "
-                  "Returns the full scoring result. Counts against your eval budget.",
-                  {}, []),
+                  "Returns the full scoring result. Counts against your eval budget. "
+                  "quick=true scores a reduced grid with fewer repeats — much faster, "
+                  "use it for inner-loop iteration; submit always re-scores the full grid.",
+                  {"quick": {"type": "boolean"}}, []),
             _spec("submit",
                   "Authoritatively evaluate and commit the current workspace as the next "
                   "version if it is correct AND matches-or-improves the best committed score. "
@@ -245,12 +247,14 @@ class ToolRegistry:
     def _budget_left(self) -> int:
         return self.ctx.max_evals - self.ctx.evals_used
 
-    def _t_evaluate(self) -> ToolOutcome:
+    def _t_evaluate(self, quick: bool = False) -> ToolOutcome:
         if self._budget_left() <= 0:
             return ToolOutcome("eval budget exhausted for this step", is_error=True)
         self.ctx.evals_used += 1
-        result = self.ctx.evaluate_fn()
+        result = self.ctx.evaluate_fn(quick=quick)
         note = f"\n[evals remaining this step: {self._budget_left()}]"
+        if quick:
+            note += " [QUICK eval — reduced grid; submit re-scores the full grid]"
         return ToolOutcome(result.to_json() + note, is_error=not result.correct)
 
     def _t_submit(self, message: str) -> ToolOutcome:

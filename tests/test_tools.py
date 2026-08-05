@@ -15,8 +15,9 @@ def registry(tmp_path):
     (kb_dir / "notes.md").write_text("# Notes\nuse online softmax\n")
     evals = {"n": 0}
 
-    def evaluate():
+    def evaluate(quick=False):
         evals["n"] += 1
+        evals["last_quick"] = quick
         return ScoreResult(correct=True, score=float(evals["n"]))
 
     submits = []
@@ -29,6 +30,7 @@ def registry(tmp_path):
                       evaluate_fn=evaluate, submit_fn=submit, max_evals=2)
     reg = ToolRegistry(ctx)
     reg._test_submits = submits
+    reg._test_evals = evals
     return reg
 
 
@@ -95,8 +97,10 @@ def test_kb_search_spreads_hits_across_files(tmp_path):
 
 
 def test_evaluate_budget_and_submit(registry):
-    r1 = registry.dispatch("evaluate", {})
+    r1 = registry.dispatch("evaluate", {"quick": True})
     assert not r1.is_error and '"score": 1.0' in r1.content
+    assert registry._test_evals["last_quick"] is True
+    assert "QUICK" in r1.content
     r2 = registry.dispatch("submit", {"message": "improved"})
     assert r2.signal == "committed" and registry._test_submits == ["improved"]
     # budget: 2 evals used (evaluate + submit) -> third rejected
