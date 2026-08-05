@@ -1,0 +1,50 @@
+{
+ "run_name": "sort-py",
+ "task": "tasks/sort_py",
+ "llm": {
+  "provider": "openai_compat",
+  "model": "deepseek-v4-flash",
+  "base_url": "https://api.deepseek.com",
+  "api_key_env": "DEEPSEEK_API_KEY",
+  "max_tokens": 8192,
+  "temperature": null,
+  "price_input_per_mtok": 0.14,
+  "price_output_per_mtok": 0.28
+ },
+ "runner": {
+  "kind": "local",
+  "host": null,
+  "scratch": "~/avo_scratch",
+  "env_activate": "",
+  "python": "python3",
+  "arch_flags": [],
+  "eval_timeout_s": 300,
+  "shell_timeout_s": 120
+ },
+ "task_params": {
+  "sizes": [
+   500,
+   2000,
+   8000
+  ]
+ },
+ "budgets": {
+  "max_versions": 5,
+  "max_steps": 8,
+  "max_wall_clock_s": 3600,
+  "max_turns_per_step": 25,
+  "max_evals_per_step": 6,
+  "max_usd": 3.0,
+  "max_total_tokens": 3000000
+ },
+ "supervisor": {
+  "stagnation_steps": 2,
+  "min_rel_improvement": 0.01,
+  "window": 3
+ },
+ "kb_dirs": [
+  "knowledge_base"
+ ],
+ "gpu_sheet": "",
+ "runs_dir": "runs"
+}

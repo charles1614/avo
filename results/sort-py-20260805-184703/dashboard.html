@@ -1,0 +1,323 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+
+<title>AVO · sort-py-20260805-184703</title>
+<style>
+  :root {
+    color-scheme: light;
+    --page: #f9f9f7; --surface: #fcfcfb;
+    --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+    --grid: #e1e0d9; --axis: #c3c2b7; --ring: rgba(11,11,11,.10);
+    --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100;
+    --good: #0ca30c; --critical: #d03b3b; --good-text: #006300;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --page: #0d0d0d; --surface: #1a1a19;
+      --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
+      --grid: #2c2c2a; --axis: #383835; --ring: rgba(255,255,255,.10);
+      --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500;
+      --good-text: #0ca30c;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --page: #0d0d0d; --surface: #1a1a19;
+    --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
+    --grid: #2c2c2a; --axis: #383835; --ring: rgba(255,255,255,.10);
+    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500;
+    --good-text: #0ca30c;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body { background: var(--page); color: var(--ink);
+         font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+         padding: 20px; }
+  .wrap { max-width: 1180px; margin: 0 auto; display: grid; gap: 14px; }
+  header { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  header h1 { font-size: 17px; font-weight: 650; }
+  header .sub { color: var(--muted); font-size: 12px; }
+  .pill { font-size: 11px; padding: 2px 9px; border-radius: 99px;
+          border: 1px solid var(--ring); color: var(--ink-2); }
+  .pill.live::before { content: "●"; color: var(--good); margin-right: 5px; }
+  button.tgl { margin-left: auto; background: var(--surface); color: var(--ink-2);
+          border: 1px solid var(--ring); border-radius: 7px; padding: 4px 10px;
+          font: inherit; font-size: 12px; cursor: pointer; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+  .tile { background: var(--surface); border: 1px solid var(--ring);
+          border-radius: 10px; padding: 12px 14px; }
+  .tile .k { font-size: 11px; color: var(--muted); text-transform: uppercase;
+             letter-spacing: .04em; }
+  .tile .v { font-size: 24px; font-weight: 650; margin-top: 2px; }
+  .tile .d { font-size: 12px; color: var(--ink-2); margin-top: 1px; }
+  .tile .d.up { color: var(--good-text); }
+  .card { background: var(--surface); border: 1px solid var(--ring);
+          border-radius: 10px; padding: 14px 16px; overflow-x: auto; }
+  .card h2 { font-size: 13px; font-weight: 650; color: var(--ink-2); margin-bottom: 8px; }
+  .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 900px) { .row2 { grid-template-columns: 1fr; } }
+  svg { display: block; width: 100%; height: auto; }
+  svg text { font: 11px system-ui, sans-serif; fill: var(--muted);
+             font-variant-numeric: tabular-nums; }
+  .legend { display: flex; gap: 16px; font-size: 12px; color: var(--ink-2);
+            margin: 6px 2px 0; flex-wrap: wrap; }
+  .legend .sw { display: inline-block; width: 10px; height: 10px;
+                border-radius: 3px; margin-right: 5px; vertical-align: -1px; }
+  #tip { position: fixed; pointer-events: none; background: var(--surface);
+         border: 1px solid var(--ring); border-radius: 8px; padding: 8px 10px;
+         font-size: 12px; color: var(--ink); box-shadow: 0 4px 14px rgba(0,0,0,.18);
+         opacity: 0; transition: opacity .08s; max-width: 340px; z-index: 9; }
+  #tip .t { color: var(--muted); font-size: 11px; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th { text-align: left; color: var(--muted); font-weight: 550; font-size: 11px;
+       text-transform: uppercase; letter-spacing: .04em; }
+  th, td { padding: 6px 10px 6px 0; border-bottom: 1px solid var(--grid); }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  td .delta { color: var(--good-text); font-size: 12px; }
+  .steps { display: flex; gap: 4px; flex-wrap: wrap; }
+  .stepbx { width: 26px; height: 26px; border-radius: 6px; border: 1px solid var(--ring);
+            display: grid; place-items: center; font-size: 11px; color: var(--ink-2);
+            position: relative; cursor: default; }
+  .stepbx.committed { background: var(--good); color: #fff; border-color: transparent; }
+  .stepbx .zap { position: absolute; top: -7px; right: -5px; font-size: 10px; }
+  footer { color: var(--muted); font-size: 11px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>AVO kernel evolution</h1>
+    <span class="sub" id="runname"></span>
+    <span class="pill" id="status"></span>
+    <button class="tgl" id="theme">◐ theme</button>
+  </header>
+  <div class="tiles" id="tiles"></div>
+  <div class="card">
+    <h2>Score per committed version — geomean TFLOPS, baselines dashed
+        <button class="tgl" id="logscale" style="float:right">log scale</button></h2>
+    <div id="mainchart"></div>
+  </div>
+  <div class="row2">
+    <div class="card">
+      <h2>Latest kernel vs best baseline — per benchmark config (TFLOPS)</h2>
+      <div id="cfgchart"></div>
+      <div class="legend" id="cfglegend"></div>
+    </div>
+    <div class="card">
+      <h2>Variation steps <span style="color:var(--muted);font-weight:400">
+          (✓ committed · ⚡ supervisor guidance · hover for detail)</span></h2>
+      <div class="steps" id="steps"></div>
+      <h2 style="margin-top:14px">Supervisor interventions</h2>
+      <div id="sup" style="font-size:12px;color:var(--ink-2)"></div>
+    </div>
+  </div>
+  <div class="card">
+    <h2>Lineage</h2>
+    <table id="lin"><thead><tr>
+      <th>version</th><th>step</th><th class="num">score</th>
+      <th class="num">Δ vs seed</th><th>change</th></tr></thead><tbody></tbody></table>
+  </div>
+  <footer id="foot"></footer>
+</div>
+<div id="tip"></div>
+<script>
+const D = {"run": "sort-py-20260805-184703", "generated_at": "2026-08-05 22:18:22", "running": true, "lineage": [{"version": "v0000", "step": 0, "commit": "e144989d7bae8a4f5e8ee5fc2ee44c6781ab9ddd", "score": 14.867748339204304, "message": "seed", "eval_hash": "eee20546a733ee2e5f9504b2b8048cf5f69773af8d91766733e72f30e750f019", "parent": null, "timestamp": "2026-08-05T10:47:16.280213+00:00", "configs": [{"size": 500, "median_ms": 7.9340829979628325, "throughput": 63.01925504540106}, {"size": 2000, "median_ms": 135.75183399370871, "throughput": 14.732765968323404}, {"size": 8000, "median_ms": 2260.0182080059312, "throughput": 3.539794490000412}]}, {"version": "v0001", "step": 2, "commit": "a5ce590d1b971ec5abe84696f607a30a5e8de8e1", "score": 3078.659189561851, "message": "Replace bubble sort with hybrid sort: insertion for n<=32, counting sort for narrow ranges, LSD base-256 bucket radix otherwise (non-mutating)", "eval_hash": "24f34ae5ba306c0f5db92de6c4955bb505818365b15dfbdec6a25ec98b5d5518", "parent": "v0000", "timestamp": "2026-08-05T10:56:03.904457+00:00", "configs": [{"size": 500, "median_ms": 0.18708300194703043, "throughput": 2672.6105247208243}, {"size": 2000, "median_ms": 0.6368749891407788, "throughput": 3140.3337139965906}, {"size": 8000, "median_ms": 2.3010000004433095, "throughput": 3476.749238791275}]}, {"version": "v0002", "step": 3, "commit": "7dcb345b18cb464bad4dde5e4993e6be88266f7d", "score": 4320.431644052427, "message": "Use bisect.insort for n<=1024, chain.from_iterable flatten, adaptive base 2048 for large lists, counting threshold 4n", "eval_hash": "598741dc4ed6b3640d8e835fcb04b5b63c40b83a1cfdf3009f1459c62f3c63e4", "parent": "v0001", "timestamp": "2026-08-05T11:27:02.580430+00:00", "configs": [{"size": 500, "median_ms": 0.0880839943420142, "throughput": 5676.400164808496}, {"size": 2000, "median_ms": 0.5627080099657178, "throughput": 3554.241213168171}, {"size": 8000, "median_ms": 2.0013750181533396, "throughput": 3997.2518530692796}]}, {"version": "v0003", "step": 5, "commit": "f5efe4b192bf1e18a2fbd0bae8f90cb4f7c4a9d2", "score": 4353.917714712105, "message": "Revert merge-at-2000 experiment: restore committed radix hybrid (bisect<=1024, counting 4n, radix 256/2048) which measures best for the eval grid", "eval_hash": "239c6cddb1c5d79b3fd4d25933b740289e8584acd7cf9dd90d75dea53691ab55", "parent": "v0002", "timestamp": "2026-08-05T11:43:00.041081+00:00", "configs": [{"size": 500, "median_ms": 0.08145900210365653, "throughput": 6138.057023627055}, {"size": 2000, "median_ms": 0.5780419742222875, "throughput": 3459.956351250878}, {"size": 8000, "median_ms": 2.0585000165738165, "throughput": 3886.3249626372426}]}], "state": {"steps_done": 5, "stagnation": 0, "failure_summaries": [], "elapsed_s": 2240.556851334026, "input_tokens": 1662051, "output_tokens": 119208, "usd": 0.2661}, "summary": {}, "steps": [{"step": 1, "turns": 25, "evals": 0, "tools": {"list_dir": 1, "read_file": 1, "shell": 14, "kb_search": 2, "write_file": 5, "edit_file": 4}, "kb": 2, "t0": 1785926836.281218, "t1": 1785927248.513141, "outcome": "failed", "version": null, "score": null, "reflected": false}, {"step": 2, "turns": 10, "evals": 2, "tools": {"list_dir": 1, "read_file": 1, "shell": 6, "write_file": 1, "evaluate": 1, "submit": 1}, "kb": 0, "t0": 1785927259.536043, "t1": 1785927363.904976, "outcome": "committed", "version": "v0001", "score": 3078.659189561851, "reflected": false}, {"step": 3, "turns": 43, "evals": 3, "tools": {"list_dir": 2, "read_file": 2, "shell": 21, "kb_search": 3, "evaluate": 2, "write_file": 14, "edit_file": 1, "submit": 1}, "kb": 3, "t0": 1785927363.9160252, "t1": 1785929222.581965, "outcome": "committed", "version": "v0002", "score": 4320.431644052427, "reflected": false}, {"step": 4, "turns": 25, "evals": 1, "tools": {"list_dir": 1, "read_file": 5, "shell": 18, "kb_search": 2, "write_file": 1, "edit_file": 1, "evaluate": 1}, "kb": 2, "t0": 1785929222.602429, "t1": 1785929506.105334, "outcome": "failed", "version": null, "score": null, "reflected": false}, {"step": 5, "turns": 25, "evals": 3, "tools": {"list_dir": 1, "read_file": 4, "shell": 12, "evaluate": 2, "write_file": 9, "submit": 1}, "kb": 0, "t0": 1785929516.3078551, "t1": 1785930180.04163, "outcome": "committed", "version": "v0003", "score": 4353.917714712105, "reflected": false}, {"step": 6, "turns": 3, "evals": 0, "tools": {"list_dir": 1, "read_file": 3, "shell": 2}, "kb": 0, "t0": 1785930180.054367, "t1": 1785930184.8835661, "outcome": "failed", "version": null, "score": null, "reflected": false}], "supervisor": [], "baselines": {"sdpa_flash": 70.395, "sdpa_cudnn": 62.97, "sdpa_efficient": 47.647, "sdpa_math": 5.869}, "baselines_per_config": {"sdpa_flash": {"s1024_b8_full": 66.709, "s2048_b4_full": 67.787, "s4096_b2_full": 68.304, "s8192_b1_full": 74.484, "s1024_b8_causal": 67.193, "s2048_b4_causal": 71.149, "s4096_b2_causal": 73.27, "s8192_b1_causal": 74.827}, "sdpa_cudnn": {"s1024_b8_full": 64.777, "s2048_b4_full": 66.779, "s4096_b2_full": 67.693, "s8192_b1_full": 68.222, "s1024_b8_causal": 52.511, "s2048_b4_causal": 58.864, "s4096_b2_causal": 62.123, "s8192_b1_causal": 64.442}, "sdpa_efficient": {"s1024_b8_full": 45.642, "s2048_b4_full": 47.869, "s4096_b2_full": 50.396, "s8192_b1_full": 50.995, "s1024_b8_causal": 42.636, "s2048_b4_causal": 46.223, "s4096_b2_causal": 48.332, "s8192_b1_causal": 49.664}, "sdpa_math": {"s1024_b8_full": 8.665, "s2048_b4_full": 9.367, "s4096_b2_full": 9.64, "s1024_b8_causal": 3.603, "s2048_b4_causal": 3.783, "s4096_b2_causal": 3.834}}, "budgets": {"max_versions": 5, "max_steps": 8, "max_wall_clock_s": 3600, "max_turns_per_step": 25, "max_evals_per_step": 6, "max_usd": 3.0, "max_total_tokens": 3000000}, "model": "deepseek-v4-flash"};
+const $ = s => document.querySelector(s);
+const el = (t, a = {}, txt) => { const n = document.createElementNS(
+  t === "svg" || a._svg ? "http://www.w3.org/2000/svg" : "http://www.w3.org/1999/xhtml", t);
+  delete a._svg; for (const k in a) n.setAttribute(k, a[k]);
+  if (txt != null) n.textContent = txt; return n; };
+const fmt = (x, d = 2) => x == null ? "–" : (+x).toLocaleString("en", {maximumFractionDigits: d});
+const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+
+/* theme toggle: auto -> light -> dark */
+{ const order = ["", "light", "dark"]; let i = 0;
+  $("#theme").onclick = () => { i = (i + 1) % 3;
+    if (order[i]) document.documentElement.setAttribute("data-theme", order[i]);
+    else document.documentElement.removeAttribute("data-theme");
+    draw(); }; }
+
+/* tooltip */
+const tip = $("#tip");
+const showTip = (ev, html_) => { tip.innerHTML = html_; tip.style.opacity = 1;
+  const pad = 14, w = tip.offsetWidth;
+  tip.style.left = Math.min(ev.clientX + pad, innerWidth - w - 8) + "px";
+  tip.style.top = (ev.clientY + pad) + "px"; };
+const hideTip = () => tip.style.opacity = 0;
+
+const lin = D.lineage, seed = lin[0], best = lin.reduce((a, b) => b.score > a.score ? b : a, lin[0] || {score: 0});
+const bl = Object.entries(D.baselines || {}).sort((a, b) => b[1] - a[1]);
+const bestBl = bl.length ? bl[0] : null;
+let logScale = false;
+$("#logscale").onclick = () => { logScale = !logScale; draw(); };
+
+function tiles() {
+  const t = $("#tiles"); t.innerHTML = "";
+  const spend = D.state.usd ?? D.summary.usd;
+  const toks = (D.state.input_tokens ?? 0) + (D.state.output_tokens ?? 0);
+  const items = [
+    ["best score", fmt(best?.score) + " TF",
+     seed && best ? "+" + fmt((best.score / seed.score - 1) * 100, 1) + "% vs seed" : "", true],
+    ["versions", lin.length ? lin.length - 1 : 0, "of " + (D.budgets.max_versions ?? "?") + " max"],
+    ["steps", D.state.steps_done ?? 0, (D.state.stagnation ?? 0) + " stagnating"],
+    ["spend", "$" + fmt(spend, 2), fmt(toks / 1e6, 2) + "M tokens · " + (D.model || "")],
+    bestBl ? ["vs " + bestBl[0], fmt(best?.score / bestBl[1] * 100, 1) + "%",
+              "baseline " + fmt(bestBl[1], 1) + " TF"] : null,
+  ].filter(Boolean);
+  for (const [k, v, d, up] of items) {
+    const c = el("div", {class: "tile"});
+    c.append(el("div", {class: "k"}, k), el("div", {class: "v"}, String(v)));
+    if (d) c.append(el("div", {class: "d" + (up ? " up" : "")}, d));
+    t.append(c);
+  }
+}
+
+function mainChart() {
+  const host = $("#mainchart"); host.innerHTML = "";
+  if (!lin.length) { host.textContent = "no committed versions yet"; return; }
+  const W = 1120, H = 320, L = 52, R = 120, T = 14, B = 34;
+  const xs = lin.map((_, i) => i);
+  const maxY = Math.max(...lin.map(e => e.score), ...(bl.map(b => b[1])), 1) * 1.08;
+  const minY = logScale ? Math.max(0.5, Math.min(...lin.map(e => e.score)) * 0.8) : 0;
+  const sx = i => L + (xs.length === 1 ? (W - L - R) / 2 : i * (W - L - R) / (xs.length - 1));
+  const sy = v => { if (logScale) { const a = Math.log10(minY), b = Math.log10(maxY);
+      return T + (H - T - B) * (1 - (Math.log10(Math.max(v, minY)) - a) / (b - a)); }
+    return T + (H - T - B) * (1 - (v - minY) / (maxY - minY)); };
+  const svg = el("svg", {viewBox: `0 0 ${W} ${H}`, _svg: 1});
+  const ticks = logScale ? [1, 2, 5, 10, 20, 50, 100].filter(v => v >= minY && v <= maxY)
+    : Array.from({length: 5}, (_, i) => minY + (maxY - minY) * i / 4);
+  for (const v of ticks) {
+    svg.append(el("line", {x1: L, x2: W - R, y1: sy(v), y2: sy(v),
+      stroke: css("--grid"), "stroke-width": 1, _svg: 1}));
+    svg.append(el("text", {x: L - 8, y: sy(v) + 4, "text-anchor": "end", _svg: 1}, fmt(v, v < 10 ? 1 : 0)));
+  }
+  svg.append(el("line", {x1: L, x2: W - R, y1: sy(minY), y2: sy(minY), stroke: css("--axis"), _svg: 1}));
+  for (const [name, v] of bl) {
+    svg.append(el("line", {x1: L, x2: W - R, y1: sy(v), y2: sy(v), stroke: css("--muted"),
+      "stroke-dasharray": "5 4", "stroke-width": 1.2, opacity: .75, _svg: 1}));
+    svg.append(el("text", {x: W - R + 6, y: sy(v) + 4, _svg: 1}, `${name} ${fmt(v, 1)}`));
+  }
+  const path = lin.map((e, i) => (i ? "L" : "M") + sx(i) + " " + sy(e.score)).join(" ");
+  svg.append(el("path", {d: path, fill: "none", stroke: css("--s1"), "stroke-width": 2,
+    "stroke-linejoin": "round", _svg: 1}));
+  lin.forEach((e, i) => {
+    svg.append(el("circle", {cx: sx(i), cy: sy(e.score), r: 4.5, fill: css("--s1"),
+      stroke: css("--surface"), "stroke-width": 2, _svg: 1}));
+    svg.append(el("text", {x: sx(i), y: H - B + 16, "text-anchor": "middle", _svg: 1}, e.version));
+  });
+  const last = lin[lin.length - 1];
+  svg.append(el("text", {x: sx(lin.length - 1), y: sy(last.score) - 10,
+    "text-anchor": "middle", fill: css("--ink"), "font-weight": 600, _svg: 1}, fmt(last.score)));
+  const overlay = el("rect", {x: L, y: T, width: W - L - R, height: H - T - B,
+    fill: "transparent", _svg: 1});
+  overlay.addEventListener("mousemove", ev => {
+    const bb = svg.getBoundingClientRect();
+    const px = (ev.clientX - bb.left) * W / bb.width;
+    let bi = 0, bd = 1e9;
+    lin.forEach((_, i) => { const d = Math.abs(sx(i) - px); if (d < bd) { bd = d; bi = i; } });
+    const e = lin[bi];
+    showTip(ev, `<b>${e.version}</b> · step ${e.step} · ${fmt(e.score)} TFLOPS` +
+      (seed && e !== seed ? ` <span class="t">(+${fmt((e.score / seed.score - 1) * 100, 1)}% vs seed)</span>` : "") +
+      `<div class="t">${(e.message || "").split("\n")[0].slice(0, 120)}</div>`);
+  });
+  overlay.addEventListener("mouseleave", hideTip);
+  svg.append(overlay);
+  host.append(svg);
+}
+
+function cfgChart() {
+  const host = $("#cfgchart"); host.innerHTML = ""; $("#cfglegend").innerHTML = "";
+  const latest = [...lin].reverse().find(e => (e.configs || []).length);
+  if (!latest) { host.textContent = "no per-config data yet"; return; }
+  const cfgs = latest.configs;
+  const blPer = bestBl ? (D.baselines_per_config[bestBl[0]] || {}) : {};
+  const key = c => `s${c.seqlen}_b${c.batch}_${c.causal ? "causal" : "full"}`;
+  const label = c => `${c.seqlen / 1024}k${c.causal ? " ⧄" : ""}`;
+  const W = 560, H = 260, L = 46, T = 12, B = 30;
+  const maxY = Math.max(...cfgs.map(c => c.tflops), ...cfgs.map(c => blPer[key(c)] || 0), 1) * 1.1;
+  const svg = el("svg", {viewBox: `0 0 ${W} ${H}`, _svg: 1});
+  const sy = v => T + (H - T - B) * (1 - v / maxY);
+  for (let i = 0; i <= 4; i++) { const v = maxY * i / 4;
+    svg.append(el("line", {x1: L, x2: W - 8, y1: sy(v), y2: sy(v), stroke: css("--grid"), _svg: 1}));
+    svg.append(el("text", {x: L - 6, y: sy(v) + 4, "text-anchor": "end", _svg: 1}, fmt(v, 0)));
+  }
+  const groupW = (W - L - 8) / cfgs.length, barW = Math.min(26, groupW / 2 - 4);
+  cfgs.forEach((c, i) => {
+    const x0 = L + i * groupW + groupW / 2;
+    const bars = [[css("--s1"), c.tflops, "kernel " + latest.version],
+                  [css("--s2"), blPer[key(c)], bestBl ? bestBl[0] : "baseline"]];
+    bars.forEach(([color, v, name], j) => {
+      if (v == null) return;
+      const x = x0 + (j - 1) * barW + (j ? 2 : -2);
+      const r = el("path", {d: `M${x} ${sy(0)} V${sy(v) + 4} Q${x} ${sy(v)} ${x + 4} ${sy(v)}` +
+        ` H${x + barW - 4} Q${x + barW} ${sy(v)} ${x + barW} ${sy(v) + 4} V${sy(0)} Z`,
+        fill: color, _svg: 1});
+      r.addEventListener("mousemove", ev => showTip(ev,
+        `<b>${label(c)} ${c.causal ? "causal" : "full"}</b> B=${c.batch}<br>${name}: ${fmt(v)} TFLOPS`));
+      r.addEventListener("mouseleave", hideTip);
+      svg.append(r);
+      if (!j) svg.append(el("text", {x: x + barW / 2, y: sy(v) - 5,
+        "text-anchor": "middle", fill: css("--ink"), _svg: 1}, fmt(v, 1)));
+    });
+    svg.append(el("text", {x: x0, y: H - B + 16, "text-anchor": "middle", _svg: 1}, label(c)));
+  });
+  host.append(svg);
+  const lg = $("#cfglegend");
+  [[css("--s1"), "kernel " + latest.version], [css("--s2"), bestBl ? bestBl[0] : "baseline"]]
+    .forEach(([c, n]) => { const s = el("span");
+      s.append(el("span", {class: "sw", style: `background:${c}`}), n); lg.append(s); });
+}
+
+function stepsRow() {
+  const host = $("#steps"); host.innerHTML = "";
+  for (const s of D.steps) {
+    const b = el("div", {class: "stepbx " + s.outcome}, s.outcome === "committed" ? "✓" : s.step);
+    if (s.reflected) b.append(el("span", {class: "zap"}, "⚡"));
+    b.addEventListener("mousemove", ev => showTip(ev,
+      `<b>step ${s.step}</b> · ${s.outcome}${s.version ? " → " + s.version + " (" + fmt(s.score) + ")" : ""}` +
+      `<div class="t">${s.turns} turns · ${s.evals} evals · ${s.kb} kb lookups` +
+      (s.reflected ? " · supervisor guided" : "") + "</div>"));
+    b.addEventListener("mouseleave", hideTip);
+    host.append(b);
+  }
+  const sup = $("#sup"); sup.innerHTML = "";
+  if (!D.supervisor.length) sup.textContent = "none yet";
+  for (const r of D.supervisor) {
+    const d = el("div", {style: "margin-bottom:8px"});
+    d.append(el("div", {style: "color:var(--muted);font-size:11px"}, "⚡ " + r.reason));
+    d.append(el("div", {}, (r.guidance || "").split("\n")[0].slice(0, 180) + "…"));
+    sup.append(d);
+  }
+}
+
+function table() {
+  const tb = $("#lin tbody"); tb.innerHTML = "";
+  for (const e of [...lin].reverse()) {
+    const tr = el("tr");
+    const dlt = seed && e.version !== "v0000"
+      ? "+" + fmt((e.score / seed.score - 1) * 100, 1) + "%" : "";
+    tr.append(el("td", {}, e.version), el("td", {}, String(e.step)),
+      el("td", {class: "num"}, fmt(e.score)),
+      Object.assign(el("td", {class: "num"}), {innerHTML: dlt ? `<span class="delta">${dlt}</span>` : "–"}),
+      el("td", {}, (e.message || "").split("\n")[0].slice(0, 110)));
+    tb.append(tr);
+  }
+}
+
+function draw() {
+  $("#runname").textContent = D.run;
+  const st = $("#status");
+  st.textContent = D.running ? "running" : "finished";
+  st.className = "pill" + (D.running ? " live" : "");
+  tiles(); mainChart(); cfgChart(); stepsRow(); table();
+  $("#foot").textContent = `generated ${D.generated_at}` +
+    (D.running ? " · auto-refreshes while `avo dashboard --watch` is running" : "") +
+    ` · ${D.state.elapsed_s ? fmt(D.state.elapsed_s / 3600, 1) + "h elapsed" : ""}`;
+}
+draw();
+</script>
+</body>
+</html>

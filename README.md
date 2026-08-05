@@ -76,6 +76,36 @@ Run artifacts live in `runs/<id>/`: `workspace/` (git repo; committed versions
 tagged `v0000..`), `lineage.jsonl`, `logs/` (per-step transcripts, failure
 patches, supervisor log), `evals/` (score cache), `state.json`, `summary.json`.
 
+## Publishing & reproducing results
+
+What must be in git for a result to be reproducible:
+
+1. **Code + configs** (this repo) — tasks define the scoring function `f`;
+   configs pin the grid, budgets, and model.
+2. **Environment pins** — `requirements-lock.txt` (framework env;
+   `pip install -r requirements-lock.txt`); the GPU-side environment is
+   recorded in every eval's `meta` (gpu, torch, cuda) and checked by
+   `scripts/setup_remote.sh`.
+3. **Knowledge-base provenance** — `knowledge_base/external/MANIFEST.json`
+   pins repo commits and doc versions; restore byte-identically with
+   `python scripts/fetch_kb.py --from-manifest` + `python scripts/fetch_nvidia_docs.py`.
+4. **Run artifacts** — `avo export --run runs/<id>` packages a run into
+   `results/<id>/` (committable): lineage + full score records, the evolved
+   solution's complete git history as `workspace.bundle`
+   (`git clone workspace.bundle` to inspect every version), the final source
+   tree, baselines, and the dashboard. `--with-transcripts` adds full agent
+   transcripts.
+
+Verification story: the agentic evolution itself is not bit-reproducible (LLM
+sampling); what reproduces is (a) every committed kernel re-scores to its
+recorded TFLOPS on matching hardware (`avo eval-once --workspace
+results/<id>/final_solution --fresh`, or `avo rebench` for mean±std), and
+(b) the method re-runs end-to-end from the seed.
+
+⚠️ Before making the repo public: remove `knowledge_base/external/nvidia_docs/`
+from git (NVIDIA docs are copyrighted; the fetch scripts + manifest replace
+them) and rotate any API key that was ever in `.env`.
+
 ## Divergences from the paper (deliberate)
 
 1. **Hardware**: RTX 3090 Ti (sm_86) / H100 (sm_90a) instead of B200;

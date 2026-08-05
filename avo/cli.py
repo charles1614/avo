@@ -137,6 +137,65 @@ def cmd_dashboard(args) -> int:
     return 0
 
 
+def cmd_export(args) -> int:
+    """Package a run into a committable results/<run_id>/ directory: lineage,
+    scores, evolved-kernel git history (bundle), final source, baselines,
+    dashboard. No LLM."""
+    import shutil
+    import subprocess
+    run_dir = Path(args.run)
+    dest = Path(args.dest) / run_dir.name
+    dest.mkdir(parents=True, exist_ok=True)
+
+    for name in ("lineage.jsonl", "summary.json", "state.json", "config.yaml"):
+        if (run_dir / name).exists():
+            shutil.copy2(run_dir / name, dest / name)
+    if (run_dir / "evals").is_dir():
+        shutil.copytree(run_dir / "evals", dest / "evals", dirs_exist_ok=True)
+    (dest / "logs").mkdir(exist_ok=True)
+    sup = run_dir / "logs" / "supervisor.jsonl"
+    if sup.exists():
+        shutil.copy2(sup, dest / "logs" / "supervisor.jsonl")
+    if args.with_transcripts:
+        for f in (run_dir / "logs").glob("*"):
+            shutil.copy2(f, dest / "logs" / f.name)
+
+    workspace = run_dir / "workspace"
+    subprocess.run(["git", "-C", str(workspace), "bundle", "create",
+                    str((dest / "workspace.bundle").resolve()), "--all"],
+                   check=True, capture_output=True)
+    kernel_dir = dest / "final_solution"
+    shutil.rmtree(kernel_dir, ignore_errors=True)
+    shutil.copytree(workspace, kernel_dir,
+                    ignore=shutil.ignore_patterns(".git", "__pycache__"))
+
+    baselines_dir = run_dir.parent / "baselines"
+    if baselines_dir.is_dir():
+        shutil.copytree(baselines_dir, dest / "baselines", dirs_exist_ok=True)
+    from avo.report.dashboard import build as build_dash
+    shutil.copy2(build_dash(run_dir), dest / "dashboard.html")
+    for name in ("report.md", "rebench.md"):
+        f = run_dir / "report" / name
+        if f.exists():
+            shutil.copy2(f, dest / name)
+
+    (dest / "README.md").write_text(
+        f"# AVO run export: {run_dir.name}\n\n"
+        "- `lineage.jsonl` / `evals/` — committed versions and their full score records\n"
+        "- `workspace.bundle` — complete git history of the evolution "
+        "(`git clone workspace.bundle kernel-history` to inspect every version)\n"
+        "- `final_solution/` — the best committed solution's source tree\n"
+        "- `baselines/`, `dashboard.html` — reference numbers and visualization\n\n"
+        "Re-verify the headline score on matching hardware:\n"
+        "```\navo eval-once --config <the config in config.yaml> "
+        "--workspace final_solution --fresh\n```\n"
+        "Note: the agentic evolution itself is not bit-reproducible (LLM "
+        "sampling); what is reproducible is verification of every committed "
+        "artifact and re-running the method.\n")
+    print(f"[avo] exported to {dest}")
+    return 0
+
+
 def cmd_report(args) -> int:
     from avo.report.report import write_report
     path = write_report(Path(args.run),
@@ -197,6 +256,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--open", action="store_true",
                    help="open the dashboard in the default browser")
     p.set_defaults(fn=cmd_dashboard)
+
+    p = sub.add_parser("export",
+                       help="package a run into committable results/ (no LLM)")
+    p.add_argument("--run", required=True)
+    p.add_argument("--dest", default="results")
+    p.add_argument("--with-transcripts", action="store_true",
+                   help="include full per-step agent transcripts (larger)")
+    p.set_defaults(fn=cmd_export)
 
     p = sub.add_parser("report", help="render lineage table + plot (no LLM)")
     p.add_argument("--run", required=True)

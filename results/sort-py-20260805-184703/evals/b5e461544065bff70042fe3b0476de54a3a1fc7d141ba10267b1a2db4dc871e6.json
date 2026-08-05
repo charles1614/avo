@@ -1,0 +1,32 @@
+{
+ "correct": true,
+ "score": 4156.516289230803,
+ "error": null,
+ "configs": [
+  {
+   "size": 500,
+   "median_ms": 0.08808300481177866,
+   "throughput": 5676.46393385911
+  },
+  {
+   "size": 2000,
+   "median_ms": 0.6185419915709645,
+   "throughput": 3233.410224777832
+  },
+  {
+   "size": 8000,
+   "median_ms": 2.044749999186024,
+   "throughput": 3912.458737344246
+  }
+ ],
+ "meta": {
+  "python": "3.10.15",
+  "sizes": [
+   500,
+   2000,
+   8000
+  ]
+ },
+ "eval_hash": "b5e461544065bff70042fe3b0476de54a3a1fc7d141ba10267b1a2db4dc871e6",
+ "cached": false
+}
