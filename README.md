@@ -2,18 +2,9 @@
 
 **An open reproduction of [*AVO: Agentic Variation Operators for Autonomous Evolutionary Search*](https://arxiv.org/abs/2603.24517) — an LLM coding agent replaces mutation and crossover in an evolutionary search, and autonomously evolves CUDA attention kernels.**
 
-![Python](https://img.shields.io/badge/python-3.10%2B-blue)
-![Tests](https://img.shields.io/badge/tests-68%20passing%20offline-brightgreen)
-![License](https://img.shields.io/badge/license-MIT-green)
-![LLM](https://img.shields.io/badge/LLM-Anthropic%20%7C%20OpenAI--compatible-8A2BE2)
+![Python](https://img.shields.io/badge/python-3.10%2B-blue) ![Tests](https://img.shields.io/badge/tests-68%20passing%20offline-brightgreen) ![License](https://img.shields.io/badge/license-MIT-green) ![LLM](https://img.shields.io/badge/LLM-Anthropic%20%7C%20OpenAI--compatible-8A2BE2)
 
-The paper's core idea: instead of `Vary(P) = Generate(Sample(P))` with fixed
-heuristics, let an autonomous agent drive variation directly —
-**`Vary(P_t) = Agent(P_t, K, f)`** — with full access to the solution lineage
-`P_t`, a domain knowledge base `K`, and the scoring function `f`. This repo
-implements the complete architecture from scratch and applies it to BF16
-attention kernels on consumer/datacenter NVIDIA GPUs (RTX 3090 Ti, H100),
-with a CPU-only toy task for zero-cost end-to-end validation.
+The paper's core idea: instead of `Vary(P) = Generate(Sample(P))` with fixed heuristics, let an autonomous agent drive variation directly — **`Vary(P_t) = Agent(P_t, K, f)`** — with full access to the solution lineage `P_t`, a domain knowledge base `K`, and the scoring function `f`. This repo implements the complete architecture from scratch and applies it to BF16 attention kernels on consumer/datacenter NVIDIA GPUs (RTX 3090 Ti, H100), with a CPU-only toy task for zero-cost end-to-end validation.
 
 ---
 
@@ -38,30 +29,16 @@ flowchart LR
     G -- "no: patch + failure summary" --> S
 ```
 
-- **The framework never trusts the agent.** Scoring runs framework-side on a
-  pristine harness copy; correctness inputs are seeded from the code's content
-  hash (hardcoded outputs can't survive an edit); a candidate is committed
-  only if it is numerically correct **and** matches-or-improves the best
-  committed score.
-- **Single-lineage evolution, git-native.** Every accepted version is a commit
-  tagged `vNNNN` with score trailers; failed attempts leave a patch + an LLM
-  failure summary that feeds the next step.
-- **Self-supervision.** A stagnation monitor reviews the whole trajectory and
-  injects fresh optimization directions when progress stalls.
-- **Runs anywhere.** The framework runs on your laptop; kernels compile and
-  benchmark on a remote GPU over plain ssh/rsync. Evals are content-hash
-  cached; killed runs resume exactly where they stopped.
+- **The framework never trusts the agent.** Scoring runs framework-side on a pristine harness copy; correctness inputs are seeded from the code's content hash (hardcoded outputs can't survive an edit); a candidate is committed only if it is numerically correct **and** matches-or-improves the best committed score.
+- **Single-lineage evolution, git-native.** Every accepted version is a commit tagged `vNNNN` with score trailers; failed attempts leave a patch + an LLM failure summary that feeds the next step.
+- **Self-supervision.** A stagnation monitor reviews the whole trajectory and injects fresh optimization directions when progress stalls.
+- **Runs anywhere.** The framework runs on your laptop; kernels compile and benchmark on a remote GPU over plain ssh/rsync. Evals are content-hash cached; killed runs resume exactly where they stopped.
 
 ## Results
 
-**Toy task (pure-Python sort, deepseek-v4-flash, $0.30):** the agent took a
-bubble-sort seed to a hybrid insertion/counting/radix design — **14.9 →
-4,320 kElem/s (~290×)** in 3 committed versions, including a gate-rejected
-regression and a committed revert. Full artifact:
-[`results/sort-py-20260805-184703/`](results/sort-py-20260805-184703/).
+**Toy task (pure-Python sort, deepseek-v4-flash, $0.30):** the agent took a bubble-sort seed to a hybrid insertion/counting/radix design — **14.9 → 4,320 kElem/s (~290×)** in 3 committed versions, including a gate-rejected regression and a committed revert. Full artifact: [`results/sort-py-20260805-184703/`](results/sort-py-20260805-184703/).
 
-**Attention forward (BF16, head_dim 128, RTX 3090 Ti):** evolution in
-progress. Reference points on the identical benchmark grid:
+**Attention forward (BF16, head_dim 128, RTX 3090 Ti):** evolution in progress. Reference points on the identical benchmark grid:
 
 | implementation | geomean TFLOPS |
 |---|---:|
@@ -112,11 +89,7 @@ avo run        --config configs/attention_3090.yaml --confirm-spend
 | `avo report` / `avo rebench` | lineage plot · re-score all versions, mean±std | none |
 | `avo export` | package a run into committable `results/` | none |
 
-**Cost safety is structural**: only `run`, `resume`, and `llm_smoke.py` can
-reach an LLM API, all three require `--confirm-spend`, and every run is
-capped by `max_usd` (from API-reported usage × configured prices) plus a
-`max_total_tokens` backstop, per-step turn/eval budgets, and wall-clock
-limits. Keys come from environment variables only.
+**Cost safety is structural**: only `run`, `resume`, and `llm_smoke.py` can reach an LLM API, all three require `--confirm-spend`, and every run is capped by `max_usd` (from API-reported usage × configured prices) plus a `max_total_tokens` backstop, per-step turn/eval budgets, and wall-clock limits. Keys come from environment variables only.
 
 ## Project structure
 
@@ -134,51 +107,28 @@ scripts/              remote preflight · KB fetchers · freshness check · LLM 
 results/              exported, committable run artifacts
 ```
 
-**Adding a new kernel task** requires zero framework changes: a task is a
-directory with `task.yaml`, a `seed/`, and a `harness/score.py` following the
-result-JSON contract (`{"correct": bool, "score": float, "configs": [...]}`).
-The CUDA build/timing utilities in `tasks/attention_cuda/harness/` are
-kernel-agnostic and copy-pastable.
+**Adding a new kernel task** requires zero framework changes: a task is a directory with `task.yaml`, a `seed/`, and a `harness/score.py` following the result-JSON contract (`{"correct": bool, "score": float, "configs": [...]}`). The CUDA build/timing utilities in `tasks/attention_cuda/harness/` are kernel-agnostic and copy-pastable.
 
 ## Reproducibility
 
 Everything a result depends on is pinned and committed:
 
 - **Code, configs, tests** — this repo; `requirements-lock.txt` pins the env.
-- **Knowledge base** — `knowledge_base/external/MANIFEST.json` records exact
-  repo commits and doc versions; `fetch_kb.py --from-manifest` restores them
-  byte-identically; `check_kb_freshness.py` audits drift against upstream.
-- **Run artifacts** — `avo export` packages lineage, full per-config score
-  records, baselines, the dashboard, and the evolved solution's **complete
-  git history** as `workspace.bundle` (`git clone workspace.bundle` to walk
-  every version).
+- **Knowledge base** — `knowledge_base/external/MANIFEST.json` records exact repo commits and doc versions; `fetch_kb.py --from-manifest` restores them byte-identically; `check_kb_freshness.py` audits drift against upstream.
+- **Run artifacts** — `avo export` packages lineage, full per-config score records, baselines, the dashboard, and the evolved solution's **complete git history** as `workspace.bundle` (`git clone workspace.bundle` to walk every version).
 
-The LLM-driven search is not bit-reproducible (sampling); every *claim* is:
-each committed kernel re-scores to its recorded TFLOPS on matching hardware
-(`avo eval-once --workspace results/<id>/final_solution --fresh`, or
-`avo rebench` for mean±std over 10 independent rounds), and the method
-re-runs end-to-end from the seed.
+The LLM-driven search is not bit-reproducible (sampling); every *claim* is: each committed kernel re-scores to its recorded TFLOPS on matching hardware (`avo eval-once --workspace results/<id>/final_solution --fresh`, or `avo rebench` for mean±std over 10 independent rounds), and the method re-runs end-to-end from the seed.
 
 ## Faithfulness to the paper — and deliberate divergences
 
-Implemented as described: single-lineage evolution with git persistence,
-correct-AND-improves commit gate, failed attempts kept out of the lineage,
-agentic edit-evaluate-diagnose variation with software-engineering tools and
-documentation retrieval, correctness-gated TFLOPS-geomean scoring, FA-style
-benchmark protocol (fixed token count, causal/non-causal, warmup + median of
-repeats), and conditional supervisor intervention.
+Implemented as described: single-lineage evolution with git persistence, correct-AND-improves commit gate, failed attempts kept out of the lineage, agentic edit-evaluate-diagnose variation with software-engineering tools and documentation retrieval, correctness-gated TFLOPS-geomean scoring, FA-style benchmark protocol (fixed token count, causal/non-causal, warmup + median of repeats), and conditional supervisor intervention.
 
 Deliberately different:
 
-1. **Hardware**: RTX 3090 Ti (sm_86) / H100 (sm_90a) instead of B200;
-   baselines are PyTorch SDPA + FlashAttention-2/3 instead of cuDNN 9.19/FA4.
-2. **Fresh agent conversation per variation step** (lineage table, last-commit
-   diff, and failure summaries injected) instead of one multi-day
-   conversation — bounded context, resumable runs.
-3. **The supervisor algorithm and seed kernel are our own designs** — the
-   paper specifies neither.
-4. **Scaled budgets**: ~10 versions over hours rather than 40 versions over
-   7 days.
+1. **Hardware**: RTX 3090 Ti (sm_86) / H100 (sm_90a) instead of B200; baselines are PyTorch SDPA + FlashAttention-2/3 instead of cuDNN 9.19/FA4.
+2. **Fresh agent conversation per variation step** (lineage table, last-commit diff, and failure summaries injected) instead of one multi-day conversation — bounded context, resumable runs.
+3. **The supervisor algorithm and seed kernel are our own designs** — the paper specifies neither.
+4. **Scaled budgets**: ~10 versions over hours rather than 40 versions over 7 days.
 
 ## Citation
 
@@ -193,11 +143,4 @@ Deliberately different:
 
 ## License
 
-[MIT](LICENSE) for the code in this repository. Knowledge-base content
-retains its upstream licenses: FlashAttention and CUTLASS (BSD-3-Clause) are
-never committed — they are restored at pinned commits by
-`scripts/fetch_kb.py --from-manifest`. The converted NVIDIA documentation
-text under `knowledge_base/external/nvidia_docs/` is © NVIDIA and is
-currently committed **for private-repo reproducibility only** — run
-`git rm -r --cached knowledge_base/external/nvidia_docs` before making this
-repository public (the fetch scripts restore it locally).
+[MIT](LICENSE) for the code in this repository. Knowledge-base content retains its upstream licenses: FlashAttention and CUTLASS (BSD-3-Clause) are never committed — they are restored at pinned commits by `scripts/fetch_kb.py --from-manifest`. The converted NVIDIA documentation text under `knowledge_base/external/nvidia_docs/` is © NVIDIA and is currently committed **for private-repo reproducibility only** — run `git rm -r --cached knowledge_base/external/nvidia_docs` before making this repository public (the fetch scripts restore it locally).
