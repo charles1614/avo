@@ -9,7 +9,7 @@ from avo.types import truncate_middle
 TEXT_EXTS = {".md", ".txt", ".rst", ".cu", ".cuh", ".h", ".hpp", ".c", ".cc",
              ".cpp", ".py", ".ptx", ".cmake", ".yaml", ".yml"}
 MAX_FILE_BYTES = 2_000_000
-MAX_RESULT_BYTES = 8_000
+MAX_RESULT_BYTES = 16_000  # tool results cap at 20 KB; stay under it
 CONTEXT_LINES = 1  # lines of context around each hit -> 3-line snippets
 
 
@@ -53,6 +53,11 @@ class KnowledgeBase:
                         break
             if file_chunks:
                 per_file.append(file_chunks)
+        if len(per_file) > max_results:
+            # more matching files than result slots: sample files evenly
+            # across the whole (sorted) list so no directory is starved
+            step = len(per_file) / max_results
+            per_file = [per_file[int(i * step)] for i in range(max_results)]
         chunks: list[str] = []
         depth = 0
         while len(chunks) < max_results and any(depth < len(f) for f in per_file):
