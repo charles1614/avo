@@ -11,7 +11,7 @@ import json
 import time
 from pathlib import Path
 
-from avo.types import ChatMessage, ToolResultBlock
+from avo.types import ChatMessage, ThinkingBlock, ToolResultBlock
 
 TOOL_RESULT_CAP = 20_000        # bytes, applied at creation time by tools
 CONTEXT_CHAR_BUDGET = 400_000   # ~100k tokens; beyond this, elide old results
@@ -47,6 +47,9 @@ def truncate_context(messages: list[ChatMessage]) -> list[ChatMessage]:
     for m in out[1:cutoff]:
         if _total_chars(out) <= CONTEXT_CHAR_BUDGET:
             break
+        # old reasoning is safe to drop entirely (providers only need the
+        # most recent turns' thinking blocks replayed)
+        m.blocks = [b for b in m.blocks if not isinstance(b, ThinkingBlock)]
         for b in m.blocks:
             if isinstance(b, ToolResultBlock) and len(b.content) > ELIDE_THRESHOLD:
                 b.content = f"[tool result elided to save context, was {len(b.content)} bytes]"

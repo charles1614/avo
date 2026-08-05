@@ -40,9 +40,20 @@ class ToolResultBlock:
     type: str = "tool_result"
 
 
-Block = Union[TextBlock, ToolUseBlock, ToolResultBlock]
+@dataclass
+class ThinkingBlock:
+    """Provider reasoning block. Anthropic requires these replayed verbatim
+    (with signature) in multi-turn tool use; OpenAI-compatible providers must
+    NOT receive them back — each adapter handles its own convention."""
+    thinking: str
+    signature: str = ""
+    type: str = "thinking"
 
-_BLOCK_TYPES = {"text": TextBlock, "tool_use": ToolUseBlock, "tool_result": ToolResultBlock}
+
+Block = Union[TextBlock, ToolUseBlock, ToolResultBlock, ThinkingBlock]
+
+_BLOCK_TYPES = {"text": TextBlock, "tool_use": ToolUseBlock,
+                "tool_result": ToolResultBlock, "thinking": ThinkingBlock}
 
 
 @dataclass

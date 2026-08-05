@@ -9,8 +9,8 @@ from typing import Any
 
 from avo.config import LLMConfig
 from avo.llm.base import LLMClient
-from avo.types import (AssistantTurn, ChatMessage, TextBlock, ToolResultBlock,
-                       ToolSpec, ToolUseBlock, Usage)
+from avo.types import (AssistantTurn, ChatMessage, TextBlock, ThinkingBlock,
+                       ToolResultBlock, ToolSpec, ToolUseBlock, Usage)
 
 
 def to_anthropic_messages(messages: list[ChatMessage]) -> list[dict]:
@@ -18,7 +18,11 @@ def to_anthropic_messages(messages: list[ChatMessage]) -> list[dict]:
     for m in messages:
         content: list[dict] = []
         for b in m.blocks:
-            if isinstance(b, TextBlock):
+            if isinstance(b, ThinkingBlock):
+                # must be replayed verbatim, and first in the assistant turn
+                content.append({"type": "thinking", "thinking": b.thinking,
+                                "signature": b.signature})
+            elif isinstance(b, TextBlock):
                 content.append({"type": "text", "text": b.text})
             elif isinstance(b, ToolUseBlock):
                 content.append({"type": "tool_use", "id": b.id, "name": b.name,
@@ -42,6 +46,9 @@ def parse_anthropic_response(resp: dict) -> AssistantTurn:
             blocks.append(TextBlock(text=c["text"]))
         elif c["type"] == "tool_use":
             blocks.append(ToolUseBlock(id=c["id"], name=c["name"], input=c["input"]))
+        elif c["type"] == "thinking":
+            blocks.append(ThinkingBlock(thinking=c.get("thinking", ""),
+                                        signature=c.get("signature", "")))
     usage = resp.get("usage", {})
     return AssistantTurn(
         message=ChatMessage(role="assistant", blocks=blocks),

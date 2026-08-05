@@ -6,9 +6,12 @@ brief: |
   Optimize the CUDA attention forward kernel in this workspace.
 
   Interface (must not change): `attention_forward(q, k, v, causal)` exposed via
-  pybind — q, k, v are contiguous BF16 CUDA tensors of shape [B, H, S, D] with
-  D = 128, softmax scale 1/sqrt(D); returns BF16 [B, H, S, D]. Both causal and
-  non-causal must be supported for arbitrary S.
+  pybind — q, k, v are contiguous BF16 CUDA tensors, q of shape [B, H, S, D]
+  with D = 128, softmax scale 1/sqrt(D); returns BF16 [B, H, S, D]. Both causal
+  and non-causal must be supported for arbitrary S. If the benchmark config
+  sets kv_heads < heads (grouped-query attention), k and v arrive as
+  [B, kv_heads, S, D] and each KV head serves heads/kv_heads consecutive query
+  heads; with kv_heads == heads this reduces to standard MHA.
 
   Files: `attention.cu` (kernel + launcher) and `binding.cpp` (pybind module).
   You may add .cu/.cuh/.cpp/.h files; all are compiled together. Optionally

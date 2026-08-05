@@ -21,22 +21,32 @@ REF_CHUNK = 1024
 
 def config_grid(params: dict) -> list[dict]:
     g = {**DEFAULT_GRID, **params}
+    kv_heads = int(g.get("kv_heads", g["heads"]))  # GQA when < heads
     configs = []
     for causal in g["causal"]:
         for s in g["seqlens"]:
             batch = max(1, g["total_tokens"] // s)
-            configs.append({"batch": batch, "heads": g["heads"], "seqlen": s,
+            configs.append({"batch": batch, "heads": g["heads"],
+                            "kv_heads": kv_heads, "seqlen": s,
                             "head_dim": g["head_dim"], "causal": bool(causal)})
     return configs
 
 
 def make_qkv(cfg: dict, seed: int, device="cuda"):
     gen = torch.Generator(device=device).manual_seed(seed)
-    shape = (cfg["batch"], cfg["heads"], cfg["seqlen"], cfg["head_dim"])
-    q = torch.randn(shape, generator=gen, device=device, dtype=torch.bfloat16)
-    k = torch.randn(shape, generator=gen, device=device, dtype=torch.bfloat16)
-    v = torch.randn(shape, generator=gen, device=device, dtype=torch.bfloat16)
+    B, H, S, D = cfg["batch"], cfg["heads"], cfg["seqlen"], cfg["head_dim"]
+    Hkv = cfg.get("kv_heads", H)
+    q = torch.randn((B, H, S, D), generator=gen, device=device, dtype=torch.bfloat16)
+    k = torch.randn((B, Hkv, S, D), generator=gen, device=device, dtype=torch.bfloat16)
+    v = torch.randn((B, Hkv, S, D), generator=gen, device=device, dtype=torch.bfloat16)
     return q, k, v
+
+
+def expand_kv(x: torch.Tensor, heads: int) -> torch.Tensor:
+    """[B, Hkv, S, D] -> [B, H, S, D] by repeating each KV head over its group."""
+    if x.shape[1] == heads:
+        return x
+    return x.repeat_interleave(heads // x.shape[1], dim=1)
 
 
 def _chunked_attention(qh, kh, vh, causal: bool, out_dtype=torch.float32,
@@ -61,8 +71,10 @@ def _chunked_attention(qh, kh, vh, causal: bool, out_dtype=torch.float32,
 
 
 def reference_fp32(q, k, v, causal: bool) -> torch.Tensor:
-    """FP32 reference on the exact (bf16-representable) input values."""
+    """FP32 reference on the exact (bf16-representable) input values.
+    Supports GQA: k/v with fewer heads are expanded over their groups."""
     B, H = q.shape[0], q.shape[1]
+    k, v = expand_kv(k, H), expand_kv(v, H)
     out = torch.empty(q.shape, device=q.device, dtype=torch.float32)
     for b in range(B):
         for h in range(H):
@@ -75,6 +87,7 @@ def reference_bf16(q, k, v, causal: bool) -> torch.Tensor:
     """An honest BF16 implementation (bf16 matmuls, fp32 softmax, bf16 PV):
     its deviation from the FP32 reference is the intrinsic error floor."""
     B, H = q.shape[0], q.shape[1]
+    k, v = expand_kv(k, H), expand_kv(v, H)
     out = torch.empty(q.shape, device=q.device, dtype=torch.float32)
     for b in range(B):
         for h in range(H):

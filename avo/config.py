@@ -76,6 +76,9 @@ class RunConfig(BaseModel):
     kb_dirs: list[str] = Field(default_factory=lambda: ["knowledge_base"])
     gpu_sheet: str = ""  # short hardware description appended to the system prompt
     runs_dir: str = "runs"
+    # Override the task's seed directory, e.g. to seed a GQA-adaptation run
+    # from a previous run's evolved kernel (paper's transfer experiment).
+    seed_dir: str | None = None
 
 
 class TaskSpec(BaseModel):

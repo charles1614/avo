@@ -41,6 +41,25 @@ def test_anthropic_parse():
     assert turn.usage.input_tokens == 10
 
 
+def test_anthropic_thinking_round_trip():
+    from avo.types import ThinkingBlock
+    turn = parse_anthropic_response({
+        "content": [{"type": "thinking", "thinking": "consider tiling",
+                     "signature": "sig123"},
+                    {"type": "tool_use", "id": "x", "name": "edit", "input": {}}],
+        "stop_reason": "tool_use", "usage": {}})
+    tb = turn.message.blocks[0]
+    assert isinstance(tb, ThinkingBlock) and tb.signature == "sig123"
+    replayed = to_anthropic_messages([turn.message])
+    assert replayed[0]["content"][0] == {"type": "thinking",
+                                         "thinking": "consider tiling",
+                                         "signature": "sig123"}
+    # openai-compat serialization must NOT include thinking blocks
+    msgs = to_openai_messages("s", [ChatMessage("user", [TextBlock("q")]),
+                                    turn.message])
+    assert "thinking" not in str(msgs)
+
+
 def test_openai_translation():
     msgs = to_openai_messages("sys", CONVO)
     assert msgs[0] == {"role": "system", "content": "sys"}

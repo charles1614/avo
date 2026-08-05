@@ -32,8 +32,9 @@ def sdpa_fn(backend_name: str):
                "sdpa_math": SDPBackend.MATH}[backend_name]
 
     def run(q, k, v, causal):
+        kw = {"enable_gqa": True} if k.shape[1] != q.shape[1] else {}
         with sdpa_kernel([backend]):
-            return F.scaled_dot_product_attention(q, k, v, is_causal=causal)
+            return F.scaled_dot_product_attention(q, k, v, is_causal=causal, **kw)
     return run
 
 

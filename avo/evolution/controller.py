@@ -104,8 +104,11 @@ class Controller:
         else:
             (self.run_dir / "config.yaml").write_text(
                 json.dumps(json.loads(config.model_dump_json()), indent=1))
-            self.lineage = Lineage.init_run(self.run_dir,
-                                            self.task_dir / self.task.seed_dir)
+            seed = (self.root / config.seed_dir if config.seed_dir
+                    else self.task_dir / self.task.seed_dir)
+            if not seed.is_dir():
+                raise FileNotFoundError(f"seed directory not found: {seed}")
+            self.lineage = Lineage.init_run(self.run_dir, seed)
 
     # -- state ------------------------------------------------------------------
 

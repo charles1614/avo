@@ -1,0 +1,58 @@
+# GQA transfer experiment (paper section: adapt the evolved MHA kernel to
+# grouped-query attention). Run AFTER an MHA evolution completes:
+#   1. avo export --run runs/attention-3090-<id>
+#   2. set seed_dir below to that export's final_solution
+#   3. avo run --config configs/attention_gqa_3090.yaml --confirm-spend
+run_name: attention-gqa-3090
+task: tasks/attention_cuda
+seed_dir: results/CHANGE-ME/final_solution   # evolved MHA kernel as the seed
+llm:
+  provider: openai_compat
+  model: deepseek-v4-flash
+  base_url: https://api.deepseek.com
+  api_key_env: DEEPSEEK_API_KEY
+  max_tokens: 16384
+  extra_body:
+    thinking:
+      type: enabled
+    reasoning_effort: high
+  price_input_per_mtok: 0.14
+  price_output_per_mtok: 0.28
+runner:
+  kind: ssh
+  host: asus
+  scratch: "~/avo_scratch"
+  env_activate: "export PATH=/usr/local/cuda/bin:$PATH && source ~/avo_scratch/venv/bin/activate"
+  python: python3
+  eval_timeout_s: 1800
+gpu_sheet: |
+  NVIDIA GeForce RTX 3090 Ti (GA102, Ampere, sm_86): 84 SMs, 128 FP32 cores/SM,
+  4 Tensor Cores/SM (bf16 mma.sync m16n8k16), 128 KB L1/shared per SM,
+  cp.async supported, NO TMA / wgmma / setmaxnreg (sm_90a only).
+task_params:
+  heads: 32          # paper's GQA setup: 32 query heads,
+  kv_heads: 4        # 4 KV heads (group size 8); also try kv_heads: 8
+  head_dim: 128
+  total_tokens: 8192
+  seqlens: [1024, 2048, 4096, 8192]
+  causal: [false, true]
+  warmup: 10
+  repeats: 30
+  arch_flags: ["-gencode", "arch=compute_86,code=sm_86"]
+  quick_overrides:
+    seqlens: [1024, 4096]
+    repeats: 10
+    warmup: 5
+budgets:
+  # the paper's adaptation took ~30 min; give it a few versions of headroom
+  max_versions: 3
+  max_steps: 8
+  max_wall_clock_s: 14400
+  max_turns_per_step: 60
+  max_evals_per_step: 12
+  max_usd: 2.0
+  max_total_tokens: 8000000
+supervisor:
+  stagnation_steps: 2
+  min_rel_improvement: 0.01
+  window: 3
