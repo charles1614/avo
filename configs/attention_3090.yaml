@@ -45,12 +45,12 @@ task_params:
     warmup: 5
 budgets:
   max_versions: 10
-  max_steps: 30
-  max_wall_clock_s: 43200
+  max_steps: 60
+  max_wall_clock_s: 86400
   max_turns_per_step: 60
   max_evals_per_step: 12
-  max_usd: 5.0
-  max_total_tokens: 20000000
+  max_usd: 20.0
+  max_total_tokens: 100000000
 supervisor:
   stagnation_steps: 2
   min_rel_improvement: 0.01

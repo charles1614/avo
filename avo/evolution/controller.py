@@ -100,7 +100,17 @@ class Controller:
 
         if self.resuming:
             self.lineage = Lineage.load(self.run_dir)
-            self.lineage.reset_workspace()  # drop any half-finished step
+            # an interrupted step's uncommitted work is starting material for
+            # the next attempt — capture it before the reset discards it
+            patch = self.lineage.capture_uncommitted_patch()
+            if patch.strip():
+                interrupted = self.state["steps_done"] + 1
+                (self.logs_dir / f"step_{interrupted:04d}_final.patch"
+                 ).write_text(patch)
+                self.state["failure_summaries"].append(
+                    f"step {interrupted}: interrupted by a restart before it "
+                    "could finish; its uncommitted diff is provided below.")
+            self.lineage.reset_workspace()
         else:
             (self.run_dir / "config.yaml").write_text(
                 json.dumps(json.loads(config.model_dump_json()), indent=1))
@@ -232,10 +242,15 @@ class Controller:
         prev = (self.state["failure_summaries"][-1]
                 if self.state["failure_summaries"] else "")
         prev_patch = ""
-        if prev:  # previous step failed: hand its actual diff to this attempt
-            patch_file = self.logs_dir / f"step_{step - 1:04d}_final.patch"
-            if patch_file.exists():
-                prev_patch = patch_file.read_text()[:8000]
+        if prev:  # a failed or interrupted attempt left a diff to build on:
+            # this step's own patch exists when it was interrupted mid-attempt,
+            # otherwise fall back to the previous step's failed attempt
+            for candidate in (f"step_{step:04d}_final.patch",
+                              f"step_{step - 1:04d}_final.patch"):
+                patch_file = self.logs_dir / candidate
+                if patch_file.exists():
+                    prev_patch = patch_file.read_text()[:8000]
+                    break
         step_prompt = build_step_prompt(self.lineage.entries(),
                                         self.lineage.last_commit_diff(),
                                         prev, guidance, prev_patch=prev_patch)
