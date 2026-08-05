@@ -69,10 +69,15 @@ avo run --config configs/sort_py.yaml --confirm-spend
 avo dashboard --watch 30 --open          # live wandb-style dashboard
 ```
 
-**Kernel evolution (remote NVIDIA GPU):**
+**Kernel evolution (remote NVIDIA GPU — works from a clean GPU host):**
 
 ```bash
-bash scripts/setup_remote.sh <ssh-host> "<env activate cmd>"   # preflight
+# one-time host provisioning: scratch dir, venv, torch wheel matched to the
+# host's CUDA toolkit, ninja, numpy (idempotent; needs only ssh + python3-venv)
+bash scripts/provision_remote.sh <ssh-host>
+bash scripts/setup_remote.sh <ssh-host> \
+  'export PATH=/usr/local/cuda/bin:$PATH && source ~/avo_scratch/venv/bin/activate'
+
 avo eval-once  --config configs/attention_3090.yaml            # score the seed (no LLM)
 avo baselines  --config configs/attention_3090.yaml            # SDPA / flash-attn lines
 avo run        --config configs/attention_3090.yaml --confirm-spend

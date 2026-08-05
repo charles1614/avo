@@ -11,9 +11,10 @@ llm:
   price_output_per_mtok: 0.0
 runner:
   kind: ssh
-  host: h100                  # CHANGE ME to the real ssh alias
+  host: h100                  # CHANGE ME to the real ssh alias, then run:
+                              #   bash scripts/provision_remote.sh h100
   scratch: "~/avo_scratch"
-  env_activate: ""
+  env_activate: "export PATH=/usr/local/cuda/bin:$PATH && source ~/avo_scratch/venv/bin/activate"
   python: python3
   eval_timeout_s: 1800
 gpu_sheet: |
