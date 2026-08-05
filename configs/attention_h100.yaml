@@ -1,0 +1,46 @@
+# Attention kernel evolution on H100 (Hopper sm_90a) — the paper's grid
+# (total tokens 32768). Set runner.host to the actual H100 ssh alias first.
+run_name: attention-h100
+task: tasks/attention_cuda
+llm:
+  provider: anthropic
+  model: claude-opus-5
+  max_tokens: 8192
+  # REQUIRED before a live run: fill from the provider's pricing page.
+  price_input_per_mtok: 0.0
+  price_output_per_mtok: 0.0
+runner:
+  kind: ssh
+  host: h100                  # CHANGE ME to the real ssh alias
+  scratch: "~/avo_scratch"
+  env_activate: ""
+  python: python3
+  eval_timeout_s: 1800
+gpu_sheet: |
+  NVIDIA H100 (GH100, Hopper, sm_90a): 132 SMs, 228 KB shared/L1 per SM
+  (dynamic shared up to 227 KB/block with cudaFuncAttribute), TMA (bulk async
+  copies), wgmma (warpgroup MMA, async, operands in shared), setmaxnreg
+  (register reallocation across warpgroups), threadblock clusters +
+  distributed shared memory. Compile with sm_90a (NOT sm_90) to expose
+  wgmma/TMA. Peak BF16 tensor ~990 TFLOPS (SXM, dense), 3.35 TB/s HBM3.
+task_params:
+  heads: 16
+  head_dim: 128
+  total_tokens: 32768
+  seqlens: [4096, 8192, 16384, 32768]
+  causal: [false, true]
+  warmup: 10
+  repeats: 30
+  arch_flags: ["-gencode", "arch=compute_90a,code=sm_90a"]
+budgets:
+  max_versions: 10
+  max_steps: 30
+  max_wall_clock_s: 43200
+  max_turns_per_step: 40
+  max_evals_per_step: 8
+  max_usd: 50.0
+  max_total_tokens: 6000000
+supervisor:
+  stagnation_steps: 2
+  min_rel_improvement: 0.01
+  window: 3

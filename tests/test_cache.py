@@ -1,0 +1,46 @@
+from avo.eval.cache import EvalCache, eval_key, tree_hash
+from avo.types import ScoreResult
+
+
+def make_tree(root, files: dict):
+    for rel, content in files.items():
+        p = root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content)
+
+
+def test_tree_hash_stable_and_content_sensitive(tmp_path):
+    a, b = tmp_path / "a", tmp_path / "b"
+    make_tree(a, {"x.py": "1", "sub/y.cu": "2"})
+    make_tree(b, {"x.py": "1", "sub/y.cu": "2"})
+    assert tree_hash(a) == tree_hash(b)
+    (b / "x.py").write_text("changed")
+    assert tree_hash(a) != tree_hash(b)
+
+
+def test_tree_hash_ignores_git_and_pycache(tmp_path):
+    a = tmp_path / "a"
+    make_tree(a, {"x.py": "1"})
+    before = tree_hash(a)
+    make_tree(a, {".git/config": "gitstuff", "__pycache__/x.pyc": "bin"})
+    assert tree_hash(a) == before
+
+
+def test_eval_key_varies_with_params_and_runner(tmp_path):
+    ws, h = tmp_path / "ws", tmp_path / "h"
+    make_tree(ws, {"k.cu": "kernel"})
+    make_tree(h, {"score.py": "s"})
+    k1 = eval_key(ws, h, {"seqlens": [1024]}, "ssh:asus:")
+    k2 = eval_key(ws, h, {"seqlens": [2048]}, "ssh:asus:")
+    k3 = eval_key(ws, h, {"seqlens": [1024]}, "ssh:h100:")
+    assert len({k1, k2, k3}) == 3
+
+
+def test_cache_round_trip(tmp_path):
+    cache = EvalCache(tmp_path / "cache")
+    r = ScoreResult(correct=True, score=12.5, configs=[{"seqlen": 1024}])
+    cache.put("k" * 64, r)
+    hit = cache.get("k" * 64)
+    assert hit is not None and hit.cached and hit.score == 12.5
+    assert hit.eval_hash == "k" * 64
+    assert cache.get("m" * 64) is None

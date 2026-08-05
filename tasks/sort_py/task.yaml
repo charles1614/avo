@@ -1,0 +1,15 @@
+name: sort_py
+seed_dir: seed
+harness_dir: harness
+score_entry: score.py
+brief: |
+  Optimize the pure-Python sorting routine in `solution.py`. The entry point is
+  `sort_list(arr: list[int]) -> list[int]`: it must return a new ascending-sorted
+  list and must not mutate its input.
+
+  Scoring: correctness on randomized lists (empty, single, duplicates, negatives),
+  then throughput in kilo-elements/second on several list sizes; the score is the
+  geometric mean across sizes. Using Python's built-in `sorted()` or `list.sort()`
+  anywhere in solution.py is banned and scores 0 — implement the algorithm yourself.
+  Standard library imports other than that are allowed. Only pure Python (no
+  subprocess, no C extensions).

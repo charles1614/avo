@@ -1,0 +1,27 @@
+name: attention_cuda
+seed_dir: seed
+harness_dir: harness
+score_entry: score.py
+brief: |
+  Optimize the CUDA attention forward kernel in this workspace.
+
+  Interface (must not change): `attention_forward(q, k, v, causal)` exposed via
+  pybind — q, k, v are contiguous BF16 CUDA tensors of shape [B, H, S, D] with
+  D = 128, softmax scale 1/sqrt(D); returns BF16 [B, H, S, D]. Both causal and
+  non-causal must be supported for arbitrary S.
+
+  Files: `attention.cu` (kernel + launcher) and `binding.cpp` (pybind module).
+  You may add .cu/.cuh/.cpp/.h files; all are compiled together. Optionally
+  create `build_flags.json` with {"extra_cuda_cflags": [...]} — allowed flags:
+  -O0..-O3, --use_fast_math, -lineinfo, --maxrregcount=N, -Xptxas..., -D<name>[=v].
+
+  Scoring: compile, then numerical correctness versus an FP32 reference on
+  randomized inputs (tolerance = 2x the intrinsic BF16 error floor + 1e-3; any
+  failure scores 0), then TFLOPS benchmarked with CUDA events across a fixed
+  grid of (seqlen, batch, causal) configs; score = geometric mean TFLOPS.
+  FLOP convention: 4*B*H*S^2*D, halved for causal.
+
+  The knowledge base has CUDA/arch tuning guides, online-softmax and
+  FlashAttention algorithm notes, PTX mma examples, and (if fetched) the
+  FlashAttention-2 sources. The seed kernel is deliberately scalar — tensor
+  cores, cp.async / TMA, better tiling, and softmax restructuring are all open.
