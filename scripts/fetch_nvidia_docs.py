@@ -79,6 +79,10 @@ def main() -> int:
     dest = Path(args.dest)
     dest.mkdir(parents=True, exist_ok=True)
 
+    import datetime
+    import json
+    manifest_path = dest.parent / "MANIFEST.json"
+    manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
     for name, url in DOCS.items():
         try:
             req = urllib.request.Request(url, headers={"User-Agent": UA})
@@ -92,8 +96,14 @@ def main() -> int:
         for i, chunk in enumerate(chunks, 1):
             suffix = f".part{i:02d}" if len(chunks) > 1 else ""
             (dest / f"{name}{suffix}.txt").write_text(chunk)
+        version = re.search(r"(\d+\.\d+(?:\.\d+)?)\s+documentation", html[:200_000])
+        manifest[f"nvidia_docs/{name}"] = {
+            "type": "doc", "url": url,
+            "version": version.group(1) if version else None,
+            "fetched_at": datetime.datetime.now(datetime.timezone.utc).isoformat()}
         print(f"{name}: {len(html) / 1e6:.1f} MB html -> "
               f"{len(text) / 1e6:.1f} MB text in {len(chunks)} file(s)")
+    manifest_path.write_text(json.dumps(manifest, indent=1))
     return 0
 
 
