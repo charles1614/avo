@@ -4,6 +4,10 @@ __pycache__/
 .venv/
 .pytest_cache/
 runs/
-knowledge_base/external/
+# vendor code repos stay unvendored (pinned by SHA in MANIFEST.json);
+# the NVIDIA doc text IS committed — its upstream is a moving website
+knowledge_base/external/*
+!knowledge_base/external/MANIFEST.json
+!knowledge_base/external/nvidia_docs/
 .DS_Store
 .env

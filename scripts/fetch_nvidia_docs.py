@@ -58,6 +58,36 @@ def html_to_text(html: str) -> str:
     return text.strip()
 
 
+TOC_LINE = re.compile(r"\.{6,}\s*\d+\s*$")
+PAGE_NUM = re.compile(r"^\s*\d{1,4}\s*$")
+CODE_CHARS = set("{};=()<>[]")
+
+
+def clean_text(text: str) -> str:
+    """Deterministic cleanup for converted docs: drop TOC dot-lines, bare page
+    numbers, and per-page boilerplate (exact lines repeating >=10x that look
+    like prose headers, not code); collapse blank runs. No LLM — the docs stay
+    verbatim ground truth, just less noisy for grep-style retrieval."""
+    from collections import Counter
+    lines = text.splitlines()
+    counts = Counter(l.strip() for l in lines if l.strip())
+    boiler = {l for l, n in counts.items()
+              if n >= 10 and 20 <= len(l) < 100
+              and not (set(l) & CODE_CHARS)
+              and any(c.isalpha() for c in l)}
+    out: list[str] = []
+    blank = 0
+    for l in lines:
+        s = l.strip()
+        if s and (TOC_LINE.search(s) or PAGE_NUM.match(s) or s in boiler):
+            continue
+        blank = blank + 1 if not s else 0
+        if blank > 1:
+            continue
+        out.append(l)
+    return "\n".join(out)
+
+
 def chunk_lines(text: str, chunk_bytes: int) -> list[str]:
     chunks, cur, size = [], [], 0
     for line in text.splitlines(keepends=True):
@@ -75,9 +105,19 @@ def chunk_lines(text: str, chunk_bytes: int) -> list[str]:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dest", default="knowledge_base/external/nvidia_docs")
+    ap.add_argument("--clean-existing", action="store_true",
+                    help="re-run the deterministic cleanup on already-fetched "
+                         "files instead of downloading")
     args = ap.parse_args()
     dest = Path(args.dest)
     dest.mkdir(parents=True, exist_ok=True)
+
+    if args.clean_existing:
+        for f in sorted(dest.glob("*.txt")):
+            before = f.stat().st_size
+            f.write_text(clean_text(f.read_text(errors="replace")))
+            print(f"{f.name}: {before / 1e3:.0f}K -> {f.stat().st_size / 1e3:.0f}K")
+        return 0
 
     import datetime
     import json
@@ -91,7 +131,7 @@ def main() -> int:
         except Exception as e:
             print(f"FAILED {name}: {type(e).__name__}: {e}")
             continue
-        text = f"# {name} — source: {url}\n\n" + html_to_text(html)
+        text = f"# {name} — source: {url}\n\n" + clean_text(html_to_text(html))
         chunks = chunk_lines(text, CHUNK_BYTES)
         for i, chunk in enumerate(chunks, 1):
             suffix = f".part{i:02d}" if len(chunks) > 1 else ""

@@ -1,0 +1,53 @@
+{
+ "cutlass": {
+  "type": "git",
+  "repo": "https://github.com/NVIDIA/cutlass.git",
+  "commit": "418ba45013423731194f8c487348a5da2511298a",
+  "kept": [
+   "include/cute",
+   "include/cutlass/arch"
+  ],
+  "fetched_at": "2026-08-05T13:45:28.758003+00:00"
+ },
+ "flash-attention": {
+  "type": "git",
+  "repo": "https://github.com/Dao-AILab/flash-attention.git",
+  "commit": "c68c592fd9da1e40a4fb0b56229caae6754ac5c9",
+  "kept": [
+   "csrc/flash_attn/src",
+   "flash_attn/flash_attn_interface.py",
+   "hopper"
+  ],
+  "fetched_at": "2026-08-05T13:45:31.996372+00:00"
+ },
+ "nvidia_docs/cuda_c_programming_guide": {
+  "type": "doc",
+  "url": "https://docs.nvidia.com/cuda/cuda-c-programming-guide/",
+  "version": null,
+  "fetched_at": "2026-08-05T13:45:31.996372+00:00"
+ },
+ "nvidia_docs/cuda_best_practices_guide": {
+  "type": "doc",
+  "url": "https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/",
+  "version": "13.3",
+  "fetched_at": "2026-08-05T13:45:31.996372+00:00"
+ },
+ "nvidia_docs/ptx_isa": {
+  "type": "doc",
+  "url": "https://docs.nvidia.com/cuda/parallel-thread-execution/",
+  "version": "9.3",
+  "fetched_at": "2026-08-05T13:45:31.996372+00:00"
+ },
+ "nvidia_docs/hopper_tuning_guide": {
+  "type": "doc",
+  "url": "https://docs.nvidia.com/cuda/hopper-tuning-guide/",
+  "version": "13.3",
+  "fetched_at": "2026-08-05T13:45:31.996372+00:00"
+ },
+ "nvidia_docs/ampere_tuning_guide": {
+  "type": "doc",
+  "url": "https://docs.nvidia.com/cuda/archive/12.6.3/ampere-tuning-guide/",
+  "version": null,
+  "fetched_at": "2026-08-05T13:45:31.996372+00:00"
+ }
+}
