@@ -32,6 +32,9 @@ correct AND score >= {best_score:.4f} (the current best committed score).
 - Large files: never emit more than ~150 lines in one write_file/edit_file
   call — the arguments get truncated past the output-token limit and the
   whole call is lost. Write a skeleton, then extend with multiple edits.
+- Workspace hygiene: delete scratch/probe/bench files before `submit` — the
+  commit should contain only files the solution needs (stray .cu files are
+  compiled into the module; stray files pollute the lineage).
 - Budget: {max_turns} turns and {max_evals} evaluations this step. Commit a
   verified improvement well before you run out.
 {gpu_sheet}\
