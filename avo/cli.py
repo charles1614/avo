@@ -112,6 +112,21 @@ def cmd_baselines(args) -> int:
     return 0
 
 
+def cmd_dashboard(args) -> int:
+    from avo.report.dashboard import build, watch
+    run_dir = Path(args.run)
+    baselines = Path(args.baselines) if args.baselines else None
+    if args.watch:
+        try:
+            watch(run_dir, baselines, interval_s=args.watch)
+        except KeyboardInterrupt:
+            pass
+        return 0
+    out = build(run_dir, baselines)
+    print(f"[avo] dashboard written to {out}")
+    return 0
+
+
 def cmd_report(args) -> int:
     from avo.report.report import write_report
     path = write_report(Path(args.run),
@@ -162,6 +177,14 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("baselines", help="benchmark baselines (no LLM)")
     p.add_argument("--config", required=True)
     p.set_defaults(fn=cmd_baselines)
+
+    p = sub.add_parser("dashboard",
+                       help="self-contained HTML dashboard for a run (no LLM)")
+    p.add_argument("--run", required=True)
+    p.add_argument("--baselines", help="baseline JSON path (default: latest)")
+    p.add_argument("--watch", type=int, metavar="SECONDS",
+                   help="regenerate every N seconds; page auto-reloads")
+    p.set_defaults(fn=cmd_dashboard)
 
     p = sub.add_parser("report", help="render lineage table + plot (no LLM)")
     p.add_argument("--run", required=True)

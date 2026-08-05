@@ -13,9 +13,7 @@ llm:
   price_output_per_mtok: 0.28
 runner:
   kind: ssh
-  # explicit user@tailscale-ip: the ~/.ssh/config "asus" alias points at a
-  # stale IP (100.121.87.104); current tailscale address is 100.88.24.34
-  host: charles@100.88.24.34
+  host: asus   # ~/.ssh/config alias (tailscale MagicDNS)
   scratch: "~/avo_scratch"
   env_activate: "export PATH=/usr/local/cuda/bin:$PATH && source ~/avo_scratch/venv/bin/activate"
   python: python3
