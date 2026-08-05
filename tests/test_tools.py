@@ -84,6 +84,16 @@ def test_kb_tools(registry):
     assert "use online softmax" in body.content
 
 
+def test_kb_search_spreads_hits_across_files(tmp_path):
+    kb_dir = tmp_path / "kb2"
+    kb_dir.mkdir()
+    # file sorting first would monopolize a naive early-stop search
+    (kb_dir / "aaa.md").write_text("needle\n" * 100)
+    (kb_dir / "zzz.md").write_text("needle in the last file\n")
+    out = KnowledgeBase([kb_dir]).search("needle", max_results=10)
+    assert "zzz.md" in out and "aaa.md" in out
+
+
 def test_evaluate_budget_and_submit(registry):
     r1 = registry.dispatch("evaluate", {})
     assert not r1.is_error and '"score": 1.0' in r1.content

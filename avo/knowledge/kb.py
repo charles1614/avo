@@ -25,32 +25,43 @@ class KnowledgeBase:
                         and ".git" not in p.parts):
                     yield root, p
 
-    def search(self, query: str, max_results: int = 30) -> str:
+    def search(self, query: str, max_results: int = 30,
+               max_hits_per_file: int = 6) -> str:
         """Regex search (falls back to literal) across all indexed files.
-        Returns `path:line:` hits with surrounding context."""
+        Returns `path:line:` hits with surrounding context. Hits are gathered
+        from EVERY file, then interleaved round-robin across files so early
+        files in sort order cannot crowd out later ones (e.g. the official
+        NVIDIA docs, which sort after the FlashAttention sources)."""
         try:
             pattern = re.compile(query, re.IGNORECASE)
         except re.error:
             pattern = re.compile(re.escape(query), re.IGNORECASE)
-        chunks: list[str] = []
-        hits = 0
+        per_file: list[list[str]] = []
         for root, p in self._iter_files():
             try:
                 lines = p.read_text(errors="replace").splitlines()
             except OSError:
                 continue
             rel = f"{root.name}/{p.relative_to(root)}"
+            file_chunks: list[str] = []
             for i, line in enumerate(lines):
                 if pattern.search(line):
                     lo, hi = max(0, i - CONTEXT_LINES), min(len(lines), i + CONTEXT_LINES + 1)
-                    snippet = "\n".join(f"{rel}:{j + 1}: {lines[j][:240]}"
-                                        for j in range(lo, hi))
-                    chunks.append(snippet)
-                    hits += 1
-                    if hits >= max_results:
+                    file_chunks.append("\n".join(f"{rel}:{j + 1}: {lines[j][:240]}"
+                                                 for j in range(lo, hi)))
+                    if len(file_chunks) >= max_hits_per_file:
                         break
-            if hits >= max_results:
-                break
+            if file_chunks:
+                per_file.append(file_chunks)
+        chunks: list[str] = []
+        depth = 0
+        while len(chunks) < max_results and any(depth < len(f) for f in per_file):
+            for f in per_file:
+                if depth < len(f):
+                    chunks.append(f[depth])
+                    if len(chunks) >= max_results:
+                        break
+            depth += 1
         if not chunks:
             return f"no matches for {query!r} in knowledge base"
         return truncate_middle("\n---\n".join(chunks), MAX_RESULT_BYTES)
