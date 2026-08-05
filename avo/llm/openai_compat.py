@@ -21,7 +21,6 @@ def to_openai_messages(system: str, messages: list[ChatMessage]) -> list[dict]:
         if m.role == "assistant":
             msg: dict = {"role": "assistant"}
             text = m.text()
-            msg["content"] = text if text else None
             tool_calls = [
                 {"id": b.id, "type": "function",
                  "function": {"name": b.name, "arguments": json.dumps(b.input)}}
@@ -29,6 +28,11 @@ def to_openai_messages(system: str, messages: list[ChatMessage]) -> list[dict]:
             ]
             if tool_calls:
                 msg["tool_calls"] = tool_calls
+                msg["content"] = text if text else None
+            else:
+                # servers reject assistant messages with neither content nor
+                # tool_calls; never emit a bare one
+                msg["content"] = text if text else "(empty)"
             out.append(msg)
         else:  # user message: text and/or tool results
             results = [b for b in m.blocks if isinstance(b, ToolResultBlock)]

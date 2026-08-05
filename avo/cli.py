@@ -78,13 +78,15 @@ def cmd_eval_once(args) -> int:
     harness = task_dir / task.harness_dir
     runner = make_runner(config.runner, "eval-once")
 
+    from avo.eval.scoring import cacheable
     cache = EvalCache(root / config.runs_dir / "eval_once_cache")
     key = eval_key(workspace, harness, config.task_params, runner.identity())
     result = None if args.fresh else cache.get(key)
     if result is None:
-        result = runner.score(workspace, harness, task.score_entry,
-                              config.task_params)
-        cache.put(key, result)
+        params = {**config.task_params, "rng_seed": int(key[:12], 16) % (2**31)}
+        result = runner.score(workspace, harness, task.score_entry, params)
+        if cacheable(result):
+            cache.put(key, result)
     print(result.to_json())
     return 0 if result.correct else 2
 

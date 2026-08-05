@@ -23,10 +23,13 @@ correct AND score >= {best_score:.4f} (the current best committed score).
 - Never modify harness/ or scoring files — scoring always uses a pristine copy;
   such edits are wasted turns.
 - Always `evaluate` before `submit`.
-- One focused optimization per version beats broad rewrites.
+- One focused optimization per version beats broad rewrites. Commit
+  incremental improvements — a committed +10% beats an uncommitted +50%.
+- `evaluate` EARLY (including the unmodified workspace, to see the scoring
+  output format) and often; do not perfect a large change without evaluating.
 - Use kb_search/kb_read before nontrivial hardware-specific work.
 - Budget: {max_turns} turns and {max_evals} evaluations this step. Commit a
-  verified improvement before you run out.
+  verified improvement well before you run out.
 {gpu_sheet}\
 """
 

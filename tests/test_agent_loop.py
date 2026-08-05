@@ -91,6 +91,18 @@ def test_budget_abort_stops_loop(tmp_path):
     assert result.turns_used == 0
 
 
+def test_turn_warning_injected_near_budget(tmp_path):
+    script = [[tool_use("evaluate", f"t{i}")] for i in range(4)] + \
+             [[tool_use("submit", "s", message="ok")]]
+    agent, llm = build_agent(tmp_path, script, max_evals=100, max_turns=4)
+    agent.run_step("sys", "step")
+    # the tool-result message fed back on the 4th-from-last turn carries a warning
+    warned = any("turns left" in m.text()
+                 for call in llm.calls for m in call["messages"]
+                 if m.role == "user")
+    assert warned
+
+
 def test_truncate_context_preserves_recent_and_first():
     big = "y" * 10_000
     messages = [ChatMessage("user", [TextBlock("step prompt")])]

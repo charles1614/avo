@@ -3,18 +3,21 @@
 run_name: attention-3090
 task: tasks/attention_cuda
 llm:
-  provider: anthropic
-  model: claude-opus-5
+  provider: openai_compat
+  model: deepseek-v4-flash
+  base_url: https://api.deepseek.com
+  api_key_env: DEEPSEEK_API_KEY
   max_tokens: 8192
-  # REQUIRED before a live run: fill from the provider's pricing page so the
-  # max_usd cap can work. With prices at 0, only max_total_tokens protects you.
-  price_input_per_mtok: 0.0
-  price_output_per_mtok: 0.0
+  # deepseek-v4-flash cache-miss rates (api-docs.deepseek.com, 2026-08)
+  price_input_per_mtok: 0.14
+  price_output_per_mtok: 0.28
 runner:
   kind: ssh
-  host: asus
+  # explicit user@tailscale-ip: the ~/.ssh/config "asus" alias points at a
+  # stale IP (100.121.87.104); current tailscale address is 100.88.24.34
+  host: charles@100.88.24.34
   scratch: "~/avo_scratch"
-  env_activate: ""            # e.g. "source ~/venvs/avo/bin/activate"
+  env_activate: "export PATH=/usr/local/cuda/bin:$PATH && source ~/avo_scratch/venv/bin/activate"
   python: python3
   eval_timeout_s: 1800
 gpu_sheet: |
@@ -38,8 +41,8 @@ budgets:
   max_wall_clock_s: 43200
   max_turns_per_step: 40
   max_evals_per_step: 8
-  max_usd: 50.0
-  max_total_tokens: 6000000
+  max_usd: 5.0
+  max_total_tokens: 20000000
 supervisor:
   stagnation_steps: 2
   min_rel_improvement: 0.01

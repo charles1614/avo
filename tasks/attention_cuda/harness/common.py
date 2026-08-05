@@ -9,6 +9,7 @@ import math
 import os
 import statistics
 import subprocess
+import time
 
 import torch
 
@@ -123,16 +124,45 @@ def geomean(xs: list[float]) -> float:
     return math.exp(sum(math.log(x) for x in xs) / len(xs))
 
 
-def other_compute_pids() -> list[str]:
-    """PIDs of other processes using the GPU (benching next to them is noise)."""
+BUSY_MEMORY_MIB = 1024  # idle desktop/monitoring daemons sit well below this
+BUSY_UTIL_PCT = 5
+
+
+def _smi(query: str, fields: str) -> list[list[str]]:
     try:
         out = subprocess.run(
-            ["nvidia-smi", "--query-compute-apps=pid", "--format=csv,noheader"],
+            ["nvidia-smi", f"--query-{query}={fields}", "--format=csv,noheader,nounits"],
             capture_output=True, text=True, timeout=10).stdout
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return []
+    return [[c.strip() for c in line.split(",")]
+            for line in out.splitlines() if line.strip()]
+
+
+def gpu_busy_reason() -> str | None:
+    """Refuse to bench only when the GPU is actually doing work: another
+    process holding real memory, or sustained nonzero utilization. Persistent
+    desktop/monitoring daemons with small footprints are fine."""
     me = str(os.getpid())
-    return [p.strip() for p in out.splitlines() if p.strip() and p.strip() != me]
+    for row in _smi("compute-apps", "pid,process_name,used_memory"):
+        if len(row) >= 3 and row[0] != me:
+            try:
+                mem = int(row[2])
+            except ValueError:
+                continue
+            if mem >= BUSY_MEMORY_MIB:
+                return (f"process {row[0]} ({row[1]}) holds {mem} MiB on the GPU")
+    utils = []
+    for _ in range(2):
+        for row in _smi("gpu", "utilization.gpu"):
+            try:
+                utils.append(int(row[0]))
+            except ValueError:
+                pass
+        time.sleep(0.25)
+    if utils and max(utils) > BUSY_UTIL_PCT:
+        return f"GPU utilization at {max(utils)}% before benching"
+    return None
 
 
 def gpu_meta() -> dict:

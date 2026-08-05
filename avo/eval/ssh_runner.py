@@ -36,11 +36,26 @@ class SSHRunner(Runner):
             raise ValueError("runner.kind=ssh requires runner.host")
         self.host = cfg.host
         self.run_id = run_id
+        self._home: str | None = None
 
     # -- low-level helpers ---------------------------------------------------
 
+    def _abs_scratch(self) -> str:
+        """Resolve '~' in the scratch path to the remote $HOME once: quoted
+        remote commands must never rely on shell tilde expansion."""
+        s = self.cfg.scratch.rstrip("/")
+        if s == "~" or s.startswith("~/"):
+            if self._home is None:
+                res = self._ssh("echo $HOME", 30)
+                home = res.stdout.strip()
+                if res.exit_code != 0 or not home.startswith("/"):
+                    raise RuntimeError(f"cannot resolve remote $HOME: {res.render()}")
+                self._home = home
+            s = self._home + s[1:]
+        return s
+
     def _remote(self, sub: str) -> str:
-        return f"{self.cfg.scratch}/{self.run_id}/{sub}"
+        return f"{self._abs_scratch()}/{self.run_id}/{sub}"
 
     def _ssh(self, remote_cmd: str, timeout_s: int) -> ShellResult:
         cmd = ["ssh", *SSH_OPTS, self.host, remote_cmd]

@@ -36,6 +36,29 @@ def test_eval_key_varies_with_params_and_runner(tmp_path):
     assert len({k1, k2, k3}) == 3
 
 
+def test_infrastructure_failures_not_cacheable():
+    from avo.eval.scoring import cacheable
+    assert cacheable(ScoreResult(correct=True, score=1.0))
+    assert cacheable(ScoreResult.failure("compile", "syntax error"))
+    assert cacheable(ScoreResult.failure("correctness", "wrong"))
+    assert not cacheable(ScoreResult.failure("harness", "rsync to remote failed"))
+    assert not cacheable(ScoreResult.failure("harness", "eval timed out"))
+
+
+def test_ssh_runner_resolves_tilde_scratch(monkeypatch):
+    from avo.config import RunnerConfig
+    from avo.eval.ssh_runner import SSHRunner
+    from avo.types import ShellResult
+    r = SSHRunner(RunnerConfig(kind="ssh", host="x", scratch="~/avo_scratch"),
+                  "run1")
+    monkeypatch.setattr(r, "_ssh",
+                        lambda cmd, t: ShellResult(0, "/home/u\n", ""))
+    assert r._remote("eval") == "/home/u/avo_scratch/run1/eval"
+    # cached: second call must not ssh again
+    monkeypatch.setattr(r, "_ssh", lambda cmd, t: (_ for _ in ()).throw(AssertionError))
+    assert r._remote("work") == "/home/u/avo_scratch/run1/work"
+
+
 def test_cache_round_trip(tmp_path):
     cache = EvalCache(tmp_path / "cache")
     r = ScoreResult(correct=True, score=12.5, configs=[{"seqlen": 1024}])

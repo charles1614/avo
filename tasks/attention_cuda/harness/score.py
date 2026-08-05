@@ -52,11 +52,11 @@ def main() -> None:
     import build as builder
 
     if not params.get("allow_busy", False):
-        pids = common.other_compute_pids()
-        if pids:
-            fail(args.out, "bench",
-                 f"GPU busy with other compute processes (pids {pids}); "
-                 "refusing to produce noisy numbers")
+        busy = common.gpu_busy_reason()
+        if busy:
+            # stage "harness": a transient machine condition, never cached
+            fail(args.out, "harness",
+                 f"GPU busy ({busy}); refusing to produce noisy numbers")
             return
 
     # -- compile ---------------------------------------------------------------

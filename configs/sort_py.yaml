@@ -2,13 +2,15 @@
 run_name: sort-py
 task: tasks/sort_py
 llm:
-  provider: anthropic
-  model: claude-opus-5
+  provider: openai_compat
+  model: deepseek-v4-flash
+  base_url: https://api.deepseek.com
+  api_key_env: DEEPSEEK_API_KEY
   max_tokens: 8192
-  # REQUIRED before a live run: fill from the provider's pricing page so the
-  # max_usd cap can work. With prices at 0, only max_total_tokens protects you.
-  price_input_per_mtok: 0.0
-  price_output_per_mtok: 0.0
+  # deepseek-v4-flash, cache-miss rates (api-docs.deepseek.com, 2026-08);
+  # conservative: cache hits are ~50x cheaper on input.
+  price_input_per_mtok: 0.14
+  price_output_per_mtok: 0.28
 runner:
   kind: local
   eval_timeout_s: 300
@@ -21,7 +23,8 @@ budgets:
   max_turns_per_step: 25
   max_evals_per_step: 6
   max_usd: 3.0
-  max_total_tokens: 400000
+  # sized for deepseek-v4-flash rates: 3M tokens ~= $0.5-0.9 worst case
+  max_total_tokens: 3000000
 supervisor:
   stagnation_steps: 2
   min_rel_improvement: 0.01

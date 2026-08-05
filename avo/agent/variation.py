@@ -56,6 +56,10 @@ class VariationAgent:
             turns += 1
             turn = self.llm.chat(system_prompt, truncate_context(messages),
                                  self.registry.specs())
+            if not turn.message.blocks:
+                # degenerate empty turn (some providers emit these); a bare
+                # assistant message is invalid in replayed history
+                turn.message.blocks.append(TextBlock("(empty model turn)"))
             self.transcript.log("assistant", turn.message)
             messages.append(turn.message)
 
@@ -83,7 +87,13 @@ class VariationAgent:
                 self.transcript.log("tool", {"name": tu.name, "input": tu.input,
                                              "is_error": is_error,
                                              "content": outcome_content[:4000]})
-            messages.append(ChatMessage("user", list(results)))
+            blocks: list = list(results)
+            remaining = self.max_turns - turns
+            if not committed and 0 < remaining <= max(2, self.max_turns // 4):
+                blocks.append(TextBlock(
+                    f"[only {remaining} turns left this step — evaluate and "
+                    "submit a verified improvement before running out]"))
+            messages.append(ChatMessage("user", blocks))
             if committed:
                 stop_cause = "committed"
                 break

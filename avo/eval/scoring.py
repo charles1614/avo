@@ -22,6 +22,15 @@ def decode_params(b64: str) -> dict:
     return json.loads(base64.b64decode(b64))
 
 
+def cacheable(result: ScoreResult) -> bool:
+    """Infrastructure failures (ssh/rsync/timeout/missing-result: stage
+    'harness') are not properties of the code — never cache them. Compile,
+    correctness, and bench failures are deterministic and cacheable."""
+    if result.correct:
+        return True
+    return (result.error or {}).get("stage") in ("compile", "correctness", "bench")
+
+
 def gate(candidate: ScoreResult, best_score: float) -> tuple[bool, str]:
     """The paper's commit rule: correct AND matches-or-improves the best
     committed score. Strict >= with no epsilon (median timing makes ties

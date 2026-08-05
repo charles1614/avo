@@ -23,7 +23,7 @@ from avo.agent.transcript import Transcript
 from avo.agent.variation import VariationAgent
 from avo.config import RunConfig, load_task_spec
 from avo.eval.cache import EvalCache, eval_key
-from avo.eval.scoring import gate
+from avo.eval.scoring import cacheable, gate
 from avo.eval.ssh_runner import make_runner
 from avo.evolution.lineage import Lineage
 from avo.evolution.supervisor import Supervisor
@@ -140,7 +140,10 @@ class Controller:
         params = {**self.config.task_params, "rng_seed": int(key[:12], 16) % (2**31)}
         result = self.runner.score(self.lineage.workspace, harness,
                                    self.task.score_entry, params)
-        self.cache.put(key, result)
+        if cacheable(result):
+            self.cache.put(key, result)
+        else:
+            result.eval_hash = key
         return result
 
     # -- main loop -----------------------------------------------------------------
@@ -225,7 +228,15 @@ class Controller:
                                         prev, guidance)
 
         log(f"[avo] step {step}: starting variation (best={best_score:.4f})")
-        result = agent.run_step(system, step_prompt)
+        try:
+            result = agent.run_step(system, step_prompt)
+        except Exception as e:  # LLM/transport failure must not kill the run
+            log(f"[avo] step {step}: aborted by error: {type(e).__name__}: {e}")
+            from avo.agent.variation import StepResult
+            result = StepResult(committed=False, submit_message=None,
+                                turns_used=0, evals_used=ctx.evals_used,
+                                last_eval_brief=f"step crashed: {type(e).__name__}: {e}",
+                                stop_cause="llm_error")
         log(f"[avo] step {step}: {result.stop_cause} after {result.turns_used} turns, "
             f"{result.evals_used} evals, ${self.budget.usd:.2f} spent")
 

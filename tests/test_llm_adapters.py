@@ -76,6 +76,15 @@ def test_openai_parse_malformed_arguments():
     assert tu.parse_error is not None and tu.input == {}
 
 
+def test_openai_empty_assistant_never_bare():
+    # a degenerate assistant turn must still serialize with content set
+    convo = [ChatMessage("user", [TextBlock("q")]),
+             ChatMessage("assistant", [])]
+    msgs = to_openai_messages("s", convo)
+    assistant = msgs[2]
+    assert assistant.get("content") or assistant.get("tool_calls")
+
+
 def test_openai_tool_error_prefixed():
     convo = [ChatMessage("user", [ToolResultBlock(tool_use_id="t9",
                                                   content="boom", is_error=True)])]
