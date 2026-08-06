@@ -1,0 +1,193 @@
+diff --git a/attention.cu b/attention.cu
+index 13c0d49..42d6552 100644
+--- a/attention.cu
++++ b/attention.cu
+@@ -108,35 +108,51 @@ __global__ void attention_fwd_kernel(
+         }
+         __syncthreads();
+ 
+-        for (int r = 0; r < ROWS_PER_WARP; ++r) {
+-            const int grow = m_tile * BLOCK_M + warp * ROWS_PER_WARP + r;
+-            if (grow >= seq_len) continue;  // uniform across the warp
+-            for (int c = 0; c < BLOCK_N; ++c) {
+-                const int gcol = nt * BLOCK_N + c;
+-                if (gcol >= seq_len) break;          // uniform across the warp
+-                if (causal && gcol > grow) break;    // columns are ascending
+-
++        // Restructured inner loop: each K/V column is read from shared once,
++        // then all ROWS_PER_WARP query rows consume it (registers). This cuts
++        // shared traffic ~8x (one column read per 8 rows instead of per row)
++        // and halves FP32 dot-product work (K*Q and V*P share the column).
++        for (int c = 0; c < BLOCK_N; ++c) {
++            const int gcol = nt * BLOCK_N + c;
++            const int grow_first = m_tile * BLOCK_M + warp * ROWS_PER_WARP;
++            const int grow_last = grow_first + ROWS_PER_WARP - 1;
++            if (gcol >= seq_len) break;                 // uniform across the warp
++            if (causal && gcol > grow_last) break;      // no row needs this col
++
++            // Vectorized 8-byte shared reads for the 4 head elements.
++            const uint2 vk = *reinterpret_cast<const uint2*>(&sK[c][d0]);
++            const __nv_bfloat16* pk = reinterpret_cast<const __nv_bfloat16*>(&vk);
++            const uint2 vv = *reinterpret_cast<const uint2*>(&sV[c][d0]);
++            const __nv_bfloat16* pv = reinterpret_cast<const __nv_bfloat16*>(&vv);
++
++            float s[ROWS_PER_WARP];
++#pragma unroll
++            for (int r = 0; r < ROWS_PER_WARP; ++r) {
+                 float partial = 0.f;
+-                // Vectorized 8-byte shared reads for the 4 head elements.
+-                const uint2 vk = *reinterpret_cast<const uint2*>(&sK[c][d0]);
+-                const __nv_bfloat16* pk = reinterpret_cast<const __nv_bfloat16*>(&vk);
+-                const uint2 vv = *reinterpret_cast<const uint2*>(&sV[c][d0]);
+-                const __nv_bfloat16* pv = reinterpret_cast<const __nv_bfloat16*>(&vv);
+ #pragma unroll
+                 for (int j = 0; j < D_PER_LANE; ++j)
+                     partial += q_reg[r][j] * __bfloat162float(pk[j]);
+-                const float s = warp_sum(partial) * scale;
++                s[r] = warp_sum(partial) * scale;
++            }
+ 
+-                // Online softmax at column granularity (tile size 1).
+-                const float m_new = fmaxf(row_max[r], s);
+-                const float corr = expf(row_max[r] - m_new);  // exp(-inf)=0 first col
+-                const float p = expf(s - m_new);
+-                row_sum[r] = row_sum[r] * corr + p;
++            // Online softmax at column granularity (tile size 1). Causal:
++            // row grow may only attend columns gcol <= grow.
++            float m_new[ROWS_PER_WARP], corr[ROWS_PER_WARP], p[ROWS_PER_WARP];
++#pragma unroll
++            for (int r = 0; r < ROWS_PER_WARP; ++r) {
++                if (causal && (grow_first + r) < gcol) continue;  // row can't attend
++                m_new[r] = fmaxf(row_max[r], s[r]);
++                corr[r] = expf(row_max[r] - m_new[r]);
++                p[r] = expf(s[r] - m_new[r]);
++                row_sum[r] = row_sum[r] * corr[r] + p[r];
++            }
++#pragma unroll
++            for (int r = 0; r < ROWS_PER_WARP; ++r) {
++                if (causal && (grow_first + r) < gcol) continue;
+ #pragma unroll
+                 for (int j = 0; j < D_PER_LANE; ++j)
+-                    acc[r][j] = acc[r][j] * corr
+-                              + p * __bfloat162float(pv[j]);
+-                row_max[r] = m_new;
++                    acc[r][j] = acc[r][j] * corr[r] + p[r] * __bfloat162float(pv[j]);
++                row_max[r] = m_new[r];
+             }
+         }
+         __syncthreads();
+diff --git a/probe_layout.cu b/probe_layout.cu
+deleted file mode 100644
+index cb7863e..0000000
+--- a/probe_layout.cu
++++ /dev/null
+@@ -1,109 +0,0 @@
+-// Standalone probe: verify mma.m16n8k16 + ldmatrix fragment layouts.
+-// A: 16x16 bf16. B: 16x8 bf16. D = A*B (16x8 f32).
+-// smem layout: block-major, each 8x8 bf16 block = 8 rows x 16 bytes contiguous.
+-#include <cuda_runtime.h>
+-#include <cuda_bf16.h>
+-#include <stdio.h>
+-#include <stdint.h>
+-
+-__device__ __forceinline__ void ldmatrix_x4(uint32_t r[4], const void* p) {
+-    uint32_t a = (uint32_t)__cvta_generic_to_shared(p);
+-    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
+-                 : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]) : "r"(a));
+-}
+-
+-// block-major smem: block b at &s[b][0][0], 8 rows x 8 bf16
+-__global__ void probe(const __nv_bfloat16* gA, const __nv_bfloat16* gB, float* gD) {
+-    __shared__ __nv_bfloat16 sA[4][8][8];
+-    __shared__ __nv_bfloat16 sB[2][8][8];
+-    int t = threadIdx.x;
+-    // A blocks: 0=(r0-7,c0-7) 1=(r0-7,c8-15) 2=(r8-15,c0-7) 3=(r8-15,c8-15)
+-    for (int i = t; i < 256; i += 32) {
+-        int b = i / 64, rem = i % 64, r = rem / 8, c = rem % 8;
+-        int gr = (b & 2) ? r + 8 : r;
+-        int gc = (b & 1) ? c + 8 : c;
+-        sA[b][r][c] = gA[gr*16 + gc];
+-    }
+-    for (int i = t; i < 128; i += 32) {
+-        int b = i / 64, rem = i % 64, r = rem / 8, c = rem % 8;
+-        sB[b][r][c] = gB[(b*8 + r)*8 + c];
+-    }
+-    __syncthreads();
+-
+-    int lane = t % 32;
+-    uint32_t a[4], b[4];
+-    // lane l supplies address of row (l%8) of matrix (l/8); matrices at 128B stride
+-    ldmatrix_x4(a, &sA[lane/8][lane%8][0]);
+-    ldmatrix_x4(b, &sB[lane/8][lane%8][0]);
+-
+-    float d[4] = {0.f, 0.f, 0.f, 0.f};
+-    asm volatile(
+-        "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
+-        "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%11,%12,%13};\n"
+-        : "=f"(d[0]), "=f"(d[1]), "=f"(d[2]), "=f"(d[3])
+-        : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]),
+-          "r"(b[0]), "r"(b[1]),
+-          "f"(d[0]), "f"(d[1]), "f"(d[2]), "f"(d[3]));
+-
+-    if (t < 32) {
+-        uint16_t ah[8], bh[4];
+-        for (int i = 0; i < 4; i++) {
+-            ah[2*i]   = (uint16_t)(a[i] & 0xffff);
+-            ah[2*i+1] = (uint16_t)(a[i] >> 16);
+-        }
+-        for (int i = 0; i < 2; i++) {
+-            bh[2*i]   = (uint16_t)(b[i] & 0xffff);
+-            bh[2*i+1] = (uint16_t)(b[i] >> 16);
+-        }
+-        printf("lane %2d: a0=%d a1=%d a2=%d a3=%d a4=%d a5=%d a6=%d a7=%d | b0=%d b1=%d b2=%d b3=%d\n",
+-               lane, ah[0], ah[1], ah[2], ah[3], ah[4], ah[5], ah[6], ah[7],
+-               bh[0], bh[1], bh[2], bh[3]);
+-        printf("        D: %f %f %f %f\n", d[0], d[1], d[2], d[3]);
+-        gD[lane*4+0] = d[0]; gD[lane*4+1] = d[1]; gD[lane*4+2] = d[2]; gD[lane*4+3] = d[3];
+-    }
+-}
+-
+-int main() {
+-    __nv_bfloat16 hA[256], hB[128];
+-    for (int i = 0; i < 16; i++)
+-        for (int j = 0; j < 16; j++) hA[i*16+j] = __float2bfloat16((float)(100 + i*16 + j));
+-    for (int i = 0; i < 16; i++)
+-        for (int j = 0; j < 8; j++) hB[i*8+j] = __float2bfloat16((float)(200 + i*8 + j));
+-
+-    __nv_bfloat16 *dA, *dB; float *dD;
+-    cudaMalloc(&dA, 256*2); cudaMalloc(&dB, 128*2); cudaMalloc(&dD, 128*4);
+-    cudaMemcpy(dA, hA, 256*2, cudaMemcpyHostToDevice);
+-    cudaMemcpy(dB, hB, 128*2, cudaMemcpyHostToDevice);
+-
+-    probe<<<1, 32>>>(dA, dB, dD);
+-    cudaDeviceSynchronize();
+-
+-    float hD[128];
+-    cudaMemcpy(hD, dD, 128*4, cudaMemcpyDeviceToHost);
+-    float ref[16][8];
+-    for (int i = 0; i < 16; i++)
+-        for (int j = 0; j < 8; j++) {
+-            float s = 0;
+-            for (int k = 0; k < 16; k++)
+-                s += __bfloat162float(hA[i*16+k]) * __bfloat162float(hB[k*8+j]);
+-            ref[i][j] = s;
+-        }
+-    // hypothesis: d0=(l/4,2*(l%4)) d1=(l/4,2*(l%4)+1) d2=(l/4+8,2*(l%4)) d3=(l/4+8,2*(l%4)+1)
+-    int errs = 0;
+-    for (int l = 0; l < 32; l++) {
+-        int r0 = l/4, c0 = 2*(l%4);
+-        float e[4] = {ref[r0][c0], ref[r0][c0+1], ref[r0+8][c0], ref[r0+8][c0+1]};
+-        for (int i = 0; i < 4; i++)
+-            if (fabsf(hD[l*4+i]-e[i]) > 0.01f) { errs++; break; }
+-    }
+-    printf(errs ? "PROBE FAILED (%d lanes)\n" : "PROBE PASSED: mma D layout = (l/4,2*(l%4)), +8 rows\n", errs);
+-
+-    // Also verify ldmatrix a-fragment mapping matches hypothesis:
+-    // a0,a1 = (l/4, 2*(l%4)),(l/4,2*(l%4)+1); a2,a3 = (l/4+8, ...); a4,a5 = (l/4, 2*(l%4)+8),+9; a6,a7 = (l/4+8, +8,+9)
+-    // Verify via a second mma test: use only block0/block2 (cols 0-7) as A, B from block... simpler: recompute D
+-    // with a fragment made of known positions. We instead verify indirectly by checking B frag mapping:
+-    // b0,b1 should equal B[2*(l%4)][l/4], B[2*(l%4)+1][l/4] (hypothesis)
+-    // b2,b3 should equal B[8+2*(l%4)][l/4], ...
+-    // We'll check via printf output above.
+-    return errs ? 1 : 0;
+-}

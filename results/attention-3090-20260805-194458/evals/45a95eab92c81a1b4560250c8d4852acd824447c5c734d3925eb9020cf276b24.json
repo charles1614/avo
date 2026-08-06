@@ -1,0 +1,13 @@
+{
+ "correct": false,
+ "score": 0.0,
+ "error": {
+  "stage": "compile",
+  "detail": "RuntimeError: Error building extension 'avo_attn_a646a29d4c5b'",
+  "log_tail": "Traceback (most recent call last):\n  File \"/home/charles/avo_scratch/venv/lib/python3.12/site-packages/torch/utils/cpp_extension.py\", line 2893, in _run_ninja_build\n    subprocess.run(\n  File \"/usr/lib/python3.12/subprocess.py\", line 571, in run\n    raise CalledProcessError(retcode, process.args,\nsubprocess.CalledProcessError: Command '['ninja', '-v']' returned non-zero exit status 2.\n\nThe above exception was the direct cause of the following exception:\n\nTraceback (most recent call last):\n  File \"/home/charles/avo_scratch/attention-3090-20260805-194458/eval/harness/score.py\", line 64, in main\n    module = builder.build(Path(args.workspace),\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/charles/avo_scratch/attention-3090-20260805-194458/eval/harness/build.py\", line 68, in build\n    return cpp_extension.load(\n           ^^^^^^^^^^^^^^^^^^^\n  File \"/home/charles/avo_scratch/venv/lib/python3.12/site-packages/torch/utils/cpp_extension.py\", line 1927, in load\n    return _jit_compile(\n           ^^^^^^^^^^^^^\n  File \"/home/charles/avo_scratch/venv/lib/python3.12/site-packages/torch/utils/cpp_extension.py\", line 2382, in _jit_compile\n    _write_ninja_file_and_build_library(\n  File \"/home/charles/avo_scratch/venv/lib/python3.12/site-packages/torch/utils/cpp_extension.py\", line 2543, in _write_ninja_file_and_build_library\n    _run_ninja_build(\n  File \"/home/charles/avo_scratch/venv/lib/python3.12/site-packages/torch/utils/cpp_extension.py\", line 2910, in _run_ninja_build\n    raise RuntimeError(message) from e\nRuntimeError: Error building extension 'avo_attn_a646a29d4c5b'\n"
+ },
+ "configs": [],
+ "meta": {},
+ "eval_hash": "45a95eab92c81a1b4560250c8d4852acd824447c5c734d3925eb9020cf276b24",
+ "cached": false
+}

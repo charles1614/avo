@@ -1,0 +1,349 @@
+diff --git a/probe.cu b/probe.cu
+new file mode 100644
+index 0000000..8f332ab
+--- /dev/null
++++ b/probe.cu
+@@ -0,0 +1,210 @@
++// Standalone probe: validate m16n8k16 bf16 mma fragment layouts for the
++// attention kernel design (QK^T via mma, S fragment -> shared store,
++// softmax, then P*V via mma with V loaded by ldmatrix.trans).
++#include <cuda_bf16.h>
++#include <cstdio>
++#include <cstdint>
++#include <cstdlib>
++#include <cmath>
++
++using bf16 = __nv_bfloat16;
++
++#define CK(x) do { cudaError_t e = (x); if (e) { printf("CUDA err %s:%d %s\n", __FILE__, __LINE__, cudaGetErrorString(e)); return 1; } } while (0)
++
++__device__ __forceinline__ void ldmatrix_x4(uint32_t r[4], const void* smem_ptr) {
++    uint32_t addr = (uint32_t)__cvta_generic_to_shared(smem_ptr);
++    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
++                 : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]) : "r"(addr));
++}
++__device__ __forceinline__ void ldmatrix_x4_trans(uint32_t r[4], const void* smem_ptr) {
++    uint32_t addr = (uint32_t)__cvta_generic_to_shared(smem_ptr);
++    asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0,%1,%2,%3}, [%4];\n"
++                 : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]) : "r"(addr));
++}
++__device__ __forceinline__ void mma_m16n8k16(float d[4], const uint32_t a[4],
++                                             const uint32_t b[2], const float c[4]) {
++    asm volatile(
++        "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
++        "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%11,%12,%13};\n"
++        : "=f"(d[0]), "=f"(d[1]), "=f"(d[2]), "=f"(d[3])
++        : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]),
++          "r"(b[0]), "r"(b[1]),
++          "f"(c[0]), "f"(c[1]), "f"(c[2]), "f"(c[3]));
++}
++
++// Shared tile: 64 rows x 128 bf16, row-major. With 32x4b swizzle: byte offset
++// for (row, col) = row*256 + col*2, swizzled: xor bits [4:6] of byte offset
++// with bits [7:9].
++__device__ __forceinline__ int swizzle_off(int row, int col) {
++    int off = row * 256 + col * 2;
++    return off ^ ((off & 0x1f0) << 3);  // xor bits4-6 with bits7-9? see below
++}
++
++__global__ void probe_kernel(int* out) {
++    __shared__ __align__(128) bf16 sQ[32 * 128];
++    __shared__ __align__(128) bf16 sK[32 * 128];
++    __shared__ __align__(128) bf16 sV[32 * 128];
++    __shared__ __align__(128) float sS[64 * 64];  // S fragment dump (row-major)
++
++    int tid = threadIdx.x;
++    // Fill tiles with deterministic pseudo-random-ish values.
++    for (int i = tid; i < 32 * 128; i += blockDim.x) {
++        int row = i / 128, col = i % 128;
++        sQ[i] = __float2bfloat16((row * 131 + col * 17) % 97 * 0.01f - 0.5f);
++        sK[i] = __float2bfloat16((row * 73 + col * 29 + 7) % 101 * 0.01f - 0.5f);
++        sV[i] = __float2bfloat16((row * 37 + col * 43 + 3) % 89 * 0.01f - 0.5f);
++    }
++    __syncthreads();
++
++    const int lane = tid % 32;
++    const int g = lane / 4, t = lane % 4;
++
++    // ---- Test 1: QK^T mma. Warp 0: S[0:16, 0:8] = Q[0:16,0:16] x K^T[0:16, 0:8]
++    if (tid < 32) {
++        // Q fragment A: 16x16 (rows 0-15, head cols 0-15). 4 quadrants of 8x8.
++        // Quadrant addr must be the address of row0 of the quadrant; lanes 0-7
++        // supply row addresses. ldmatrix reads 8 consecutive rows of 16 bytes
++        // from each address (the address given by lane l%8... actually each of
++        // the 8 lanes provides one 16-byte row address; we use quadrant base
++        // and rely on default: all lanes 0-7 pass the same base? NO - each lane
++        // supplies its own address. Standard: lanes 0-7 give addresses for the
++        // 8 rows of matrix 0, lanes 8-15 for matrix 1, etc. Pass base+row*32
++        // (byte) so rows are 16 bytes apart (8 bf16).
++        // Here we test with quadrant base addresses passed by all lanes.
++        uint32_t a[4], b[4];
++        float d[4];
++        const float z[4] = {0, 0, 0, 0};
++        // Matrix0 = rows0-7 cols0-7, m1 = rows0-7 cols8-15, m2 = rows8-15
++        // cols0-7, m3 = rows8-15 cols8-15. Address for matrix i given by lanes
++        // 8i..8i+7. We give base + (matrix row)*16B. For m0: rows 0..7 col 0.
++        // All lanes in group pass address of (row 0 of their quadrant) so that
++        // the i-th lane of the group gives row i*16 bytes.
++        uint32_t qaddr[4] = {
++            (uint32_t)__cvta_generic_to_shared(&sQ[0 * 128 + 0]),
++            (uint32_t)__cvta_generic_to_shared(&sQ[0 * 128 + 8]),
++            (uint32_t)__cvta_generic_to_shared(&sQ[8 * 128 + 0]),
++            (uint32_t)__cvta_generic_to_shared(&sQ[8 * 128 + 8]),
++        };
++        // Each lane passes the byte address of its own row (16 bytes = 8 bf16);
++        // rows are 256 bytes apart in the shared tile.
++        int m = lane / 8, r = lane % 8;
++        uint32_t my_addr = qaddr[m] + r * 256;
++        asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
++                     : "=r"(a[0]), "=r"(a[1]), "=r"(a[2]), "=r"(a[3]) : "r"(my_addr));
++
++        // K fragment B (transposed): K^T[0:16 head, 0:8 kv] stored as K[8 kv][16 head].
++        // Quadrants of K region rows0-15 x cols0-15: m0=kv0-7,head0-7;
++        // m1=kv0-7,head8-15; m2=kv8-15,head0-7; m3=kv8-15,head8-15.
++        uint32_t kaddr[4] = {
++            (uint32_t)__cvta_generic_to_shared(&sK[0 * 128 + 0]),
++            (uint32_t)__cvta_generic_to_shared(&sK[0 * 128 + 8]),
++            (uint32_t)__cvta_generic_to_shared(&sK[8 * 128 + 0]),
++            (uint32_t)__cvta_generic_to_shared(&sK[8 * 128 + 8]),
++        };
++        my_addr = kaddr[m] + r * 256;
++        asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0,%1,%2,%3}, [%4];\n"
++                     : "=r"(b[0]), "=r"(b[1]), "=r"(b[2]), "=r"(b[3]) : "r"(my_addr));
++
++        // A operand regs: {a0,a1,a2,a3} = {r0,r2,r1,r3}? (see notes)
++        uint32_t A[4] = {a[0], a[2], a[1], a[3]};
++        // B operand regs for m16n8k16: 2 regs. From the x4.trans load of the
++        // full 16x16 K region we get 4 regs; B needs only head cols 0-7 ->
++        // matrix 0 (b0) and matrix 2 (b1) give kv rows... we test both.
++        uint32_t B[2] = {b[0], b[2]};
++        mma_m16n8k16(d, A, B, z);
++
++        // Reference: S[r][c] = sum_{hd=0..15} Q[r][hd]*K[c][hd], r in 0..15, c in 0..7
++        // C fragment: c0,c1 = row g, cols 2t,2t+1; c2,c3 = row g+8, cols 2t,2t+1.
++        float ref[4];
++        int rows[4] = {g, g, g + 8, g + 8};
++        int cols[4] = {2 * t, 2 * t + 1, 2 * t, 2 * t + 1};
++        for (int i = 0; i < 4; ++i) {
++            float acc = 0;
++            for (int hd = 0; hd < 16; ++hd)
++                acc += __bfloat162float(sQ[rows[i] * 128 + hd]) *
++                       __bfloat162float(sK[cols[i] * 128 + hd]);
++            ref[i] = acc;
++        }
++        bool ok = true;
++        for (int i = 0; i < 4; ++i)
++            if (fabsf(d[i] - ref[i]) > 1e-2f) ok = false;
++        if (lane == 0) printf("TEST1 (QK mma): %s\n", ok ? "PASS" : "FAIL");
++        if (!ok && lane < 4) {
++            printf("  lane %d d=(%.3f %.3f %.3f %.3f) ref=(%.3f %.3f %.3f %.3f) A=(%08x %08x %08x %08x)\n",
++                   lane, d[0], d[1], d[2], d[3], ref[0], ref[1], ref[2], ref[3],
++                   A[0], A[1], A[2], A[3]);
++        }
++
++        // ---- Test 2: store S fragment (16x8) to shared row-major sS[16][8],
++        // then load B-operand for P*V via ldmatrix.trans from V.
++        // S fragment rows: c0,c1 -> row g; c2,c3 -> row g+8; cols 2t,2t+1.
++        sS[g * 64 + 2 * t] = d[0];
++        sS[g * 64 + 2 * t + 1] = d[1];
++        sS[(g + 8) * 64 + 2 * t] = d[2];
++        sS[(g + 8) * 64 + 2 * t + 1] = d[3];
++        __syncthreads();
++        // Read back: verify row-major round trip (each lane reads its own).
++        float back[4] = {sS[g * 64 + 2 * t], sS[g * 64 + 2 * t + 1],
++                         sS[(g + 8) * 64 + 2 * t], sS[(g + 8) * 64 + 2 * t + 1]};
++        bool ok2 = true;
++        for (int i = 0; i < 4; ++i)
++            if (back[i] != d[i]) ok2 = false;
++        if (lane == 0) printf("TEST2 (S store/load): %s\n", ok2 ? "PASS" : "FAIL");
++
++        // ---- Test 3: P*V mma: O[16,8] = P[16,16] x V[16,8] where P = S stored
++        // row-major 16x16 (subset of sS), V = sV[16 kv][16 head] transposed.
++        // A operand (P) from shared via ldmatrix.x4 non-trans (16x16 region of
++        // sS rows 0-15 cols 0-15).
++        uint32_t paddr[4] = {
++            (uint32_t)__cvta_generic_to_shared(&sS[0 * 64 + 0]),
++            (uint32_t)__cvta_generic_to_shared(&sS[0 * 64 + 8]),
++            (uint32_t)__cvta_generic_to_shared(&sS[8 * 64 + 0]),
++            (uint32_t)__cvta_generic_to_shared(&sS[8 * 64 + 8]),
++        };
++        my_addr = paddr[m] + r * 256;  // sS rows are 64 floats = 256 bytes
++        asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
++                     : "=r"(A[0]), "=r"(A[1]), "=r"(A[2]), "=r"(A[3]) : "r"(my_addr));
++        // V B-operand: ldmatrix.trans from V rows 0-15, cols 0-15.
++        uint32_t vaddr[4] = {
++            (uint32_t)__cvta_generic_to_shared(&sV[0 * 128 + 0]),
++            (uint32_t)__cvta_generic_to_shared(&sV[0 * 128 + 8]),
++            (uint32_t)__cvta_generic_to_shared(&sV[8 * 128 + 0]),
++            (uint32_t)__cvta_generic_to_shared(&sV[8 * 128 + 8]),
++        };
++        my_addr = vaddr[m] + r * 256;
++        asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0,%1,%2,%3}, [%4];\n"
++                     : "=r"(b[0]), "=r"(b[1]), "=r"(b[2]), "=r"(b[3]) : "r"(my_addr));
++        uint32_t Bv[2] = {b[0], b[2]};
++        float o[4] = {0, 0, 0, 0};
++        mma_m16n8k16(o, A, Bv, z);
++        // Reference: O[r][c] = sum_{kv=0..15} P[r][kv]*V[kv][c], P from sS.
++        float oref[4];
++        for (int i = 0; i < 4; ++i) {
++            float acc = 0;
++            for (int kv = 0; kv < 16; ++kv)
++                acc += sS[rows[i] * 64 + kv] * __bfloat162float(sV[kv * 128 + cols[i]]);
++            oref[i] = acc;
++        }
++        bool ok3 = true;
++        for (int i = 0; i < 4; ++i)
++            if (fabsf(o[i] - oref[i]) > 1e-2f) ok3 = false;
++        if (lane == 0) printf("TEST3 (P*V mma): %s\n", ok3 ? "PASS" : "FAIL");
++        if (!ok3 && lane < 4) {
++            printf("  lane %d o=(%.3f %.3f %.3f %.3f) oref=(%.3f %.3f %.3f %.3f) Bv=(%08x %08x)\n",
++                   lane, o[0], o[1], o[2], o[3], oref[0], oref[1], oref[2], oref[3], Bv[0], Bv[1]);
++        }
++    }
++    if (tid == 0) out[0] = 1;
++}
++
++int main() {
++    int* out = nullptr;
++    CK(cudaMalloc(&out, sizeof(int)));
++    CK(cudaMemset(out, 0, sizeof(int)));
++    probe_kernel<<<1, 256>>>(out);
++    CK(cudaDeviceSynchronize());
++    int v = 0;
++    CK(cudaMemcpy(&v, out, sizeof(int), cudaMemcpyDeviceToHost));
++    printf("done: %d\n", v);
++    return 0;
++}
+diff --git a/probe2.cu b/probe2.cu
+new file mode 100644
+index 0000000..e1c306f
+--- /dev/null
++++ b/probe2.cu
+@@ -0,0 +1,127 @@
++// Probe 2: validate m16n8k16 mma fragment mapping using DIRECT per-lane
++// shared loads (no ldmatrix), with padded shared rows (136 bf16/row).
++#include <cuda_bf16.h>
++#include <cstdio>
++#include <cstdint>
++#include <cstdlib>
++#include <cmath>
++
++using bf16 = __nv_bfloat16;
++#define CK(x) do { cudaError_t e = (x); if (e) { printf("CUDA err %s:%d %s\n", __FILE__, __LINE__, cudaGetErrorString(e)); return 1; } } while (0)
++
++__device__ __forceinline__ void mma_m16n8k16(float d[4], const uint32_t a[4],
++                                             const uint32_t b[2], const float c[4]) {
++    asm volatile(
++        "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
++        "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%11,%12,%13};\n"
++        : "=f"(d[0]), "=f"(d[1]), "=f"(d[2]), "=f"(d[3])
++        : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]),
++          "r"(b[0]), "r"(b[1]),
++          "f"(c[0]), "f"(c[1]), "f"(c[2]), "f"(c[3]));
++}
++
++// Load a 32-bit (2 bf16) fragment element from a row-major padded tile.
++__device__ __forceinline__ uint32_t ld2(const bf16* tile, int row, int col) {
++    return *reinterpret_cast<const uint32_t*>(&tile[row * 136 + col]);
++}
++
++__global__ void probe_kernel(int* out) {
++    __shared__ __align__(128) bf16 sQ[16 * 136];
++    __shared__ __align__(128) bf16 sK[16 * 136];
++    __shared__ __align__(128) bf16 sV[16 * 136];
++    __shared__ __align__(128) float sS[16 * 64];  // S row-major 16x16 (floats)
++    __shared__ __align__(128) bf16 sP[16 * 136];  // S converted to bf16
++
++    int tid = threadIdx.x;
++    for (int i = tid; i < 16 * 136; i += blockDim.x) {
++        int row = i / 136, col = i % 136;
++        if (col < 128) {
++            sQ[i] = __float2bfloat16((row * 131 + col * 17) % 97 * 0.01f - 0.5f);
++            sK[i] = __float2bfloat16((row * 73 + col * 29 + 7) % 101 * 0.01f - 0.5f);
++            sV[i] = __float2bfloat16((row * 37 + col * 43 + 3) % 89 * 0.01f - 0.5f);
++        }
++    }
++    __syncthreads();
++
++    const int lane = tid % 32;
++    const int g = lane / 4, t = lane % 4;
++
++    if (tid < 32) {
++        const float z[4] = {0, 0, 0, 0};
++        // ---- Test 1: QK^T. S[16,8] = Q[16,16] x K^T[16,8].
++        // A fragment: a0=Q[g][2t..2t+1], a1=Q[g+8][2t..2t+1],
++        //             a2=Q[g][2t+8..2t+9], a3=Q[g+8][2t+8..2t+9]
++        // B fragment (K^T): b0 = K^T[2t][g],K^T[2t+1][g] = K[g][2t..2t+1]
++        //                    b1 = K^T[2t+8][g],K^T[2t+9][g] = K[g][2t+8..2t+9]
++        uint32_t A[4] = {ld2(sQ, g, 2 * t), ld2(sQ, g + 8, 2 * t),
++                         ld2(sQ, g, 2 * t + 8), ld2(sQ, g + 8, 2 * t + 8)};
++        uint32_t B[2] = {ld2(sK, g, 2 * t), ld2(sK, g, 2 * t + 8)};
++        float d[4];
++        mma_m16n8k16(d, A, B, z);
++
++        // Reference: C frag = row g / g+8, cols 2t, 2t+1.
++        float ref[4];
++        int rows[4] = {g, g, g + 8, g + 8};
++        int cols[4] = {2 * t, 2 * t + 1, 2 * t, 2 * t + 1};
++        for (int i = 0; i < 4; ++i) {
++            float acc = 0;
++            for (int hd = 0; hd < 16; ++hd)
++                acc += __bfloat162float(sQ[rows[i] * 136 + hd]) *
++                       __bfloat162float(sK[cols[i] * 136 + hd]);
++            ref[i] = acc;
++        }
++        bool ok = true;
++        for (int i = 0; i < 4; ++i) if (fabsf(d[i] - ref[i]) > 1e-2f) ok = false;
++        if (lane == 0) printf("TEST1 (QK mma, direct loads): %s\n", ok ? "PASS" : "FAIL");
++        if (!ok && lane < 4)
++            printf("  lane %d d=(%.3f %.3f %.3f %.3f) ref=(%.3f %.3f %.3f %.3f)\n",
++                   lane, d[0], d[1], d[2], d[3], ref[0], ref[1], ref[2], ref[3]);
++
++        // Store S fragment (16x8) row-major into sS for the PV test.
++        sS[g * 64 + 2 * t] = d[0];
++        sS[g * 64 + 2 * t + 1] = d[1];
++        sS[(g + 8) * 64 + 2 * t] = d[2];
++        sS[(g + 8) * 64 + 2 * t + 1] = d[3];
++        __syncthreads();
++
++        // ---- Test 2: P*V. O[16,8] = P[16,16] x V[16,8].
++        // A fragment from sS (fp32!) - mma needs bf16 A. Convert sS to bf16
++        // tile sP first.
++        if (tid < 16 * 16) {
++            int r = tid / 16, c = tid % 16;
++            sP[r * 136 + c] = __float2bfloat16(sS[r * 64 + c]);
++        }
++        __syncthreads();
++        uint32_t AP[4] = {ld2(sP, g, 2 * t), ld2(sP, g + 8, 2 * t),
++                          ld2(sP, g, 2 * t + 8), ld2(sP, g + 8, 2 * t + 8)};
++        uint32_t BV[2] = {ld2(sV, g, 2 * t), ld2(sV, g, 2 * t + 8)};
++        float o[4];
++        mma_m16n8k16(o, AP, BV, z);
++        float oref[4];
++        for (int i = 0; i < 4; ++i) {
++            float acc = 0;
++            for (int kv = 0; kv < 16; ++kv)
++                acc += __bfloat162float(sP[kv * 136 + rows[i]]) *
++                       __bfloat162float(sV[kv * 136 + cols[i]]);
++            oref[i] = acc;
++        }
++        bool ok3 = true;
++        for (int i = 0; i < 4; ++i) if (fabsf(o[i] - oref[i]) > 1e-2f) ok3 = false;
++        if (lane == 0) printf("TEST2 (PV mma, direct loads): %s\n", ok3 ? "PASS" : "FAIL");
++        if (!ok3 && lane < 4)
++            printf("  lane %d o=(%.3f %.3f %.3f %.3f) oref=(%.3f %.3f %.3f %.3f)\n",
++                   lane, o[0], o[1], o[2], o[3], oref[0], oref[1], oref[2], oref[3]);
++    }
++    if (tid == 0) out[0] = 1;
++}
++
++int main() {
++    int* out = nullptr;
++    CK(cudaMalloc(&out, sizeof(int)));
++    probe_kernel<<<1, 256>>>(out);
++    CK(cudaDeviceSynchronize());
++    int v = 0;
++    CK(cudaMemcpy(&v, out, sizeof(int), cudaMemcpyDeviceToHost));
++    printf("done: %d\n", v);
++    return 0;
++}

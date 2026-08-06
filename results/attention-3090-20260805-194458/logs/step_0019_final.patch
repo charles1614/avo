@@ -1,0 +1,223 @@
+diff --git a/attention.cu b/attention.cu
+index c079177..72989bf 100644
+--- a/attention.cu
++++ b/attention.cu
+@@ -24,6 +24,7 @@ constexpr int NUM_WARPS = 8;
+ constexpr int NUM_THREADS = NUM_WARPS * 32;
+ constexpr int ROWS_PER_WARP = BLOCK_M / NUM_WARPS;  // 8
+ constexpr int D_PER_LANE = HEAD_DIM / 32;           // 4
++constexpr float LOG2E = 1.4426950408889634f;
+ 
+ __device__ __forceinline__ float warp_sum(float v) {
+ #pragma unroll
+@@ -128,7 +129,9 @@ __global__ void attention_fwd_kernel(
+             float k_f[D_PER_LANE], v_f[D_PER_LANE];
+ #pragma unroll
+             for (int j = 0; j < D_PER_LANE; ++j) {
+-                k_f[j] = __bfloat162float(pk[j]);
++                // Pre-scale K by scale*log2(e) so scores come out directly in
++                // log2 domain (saves one FMUL per row, and one inside __expf).
++                k_f[j] = __bfloat162float(pk[j]) * (scale * LOG2E);
+                 v_f[j] = __bfloat162float(pv[j]);
+             }
+ 
+@@ -139,7 +142,7 @@ __global__ void attention_fwd_kernel(
+ #pragma unroll
+                 for (int j = 0; j < D_PER_LANE; ++j)
+                     partial += q_reg[r][j] * k_f[j];
+-                s[r] = warp_sum(partial) * scale;
++                s[r] = warp_sum(partial);
+             }
+ 
+             // Fused online softmax + output accumulation (tile size 1),
+@@ -154,15 +157,15 @@ __global__ void attention_fwd_kernel(
+                 if (causal && (grow_first + r) < gcol) continue;  // row can't attend
+                 float p;
+                 if (s[r] > row_max[r]) {
+-                    // New running max: rescale history, p = exp(0) = 1.
+-                    const float rescale = __expf(row_max[r] - s[r]);
++                    // New running max: rescale history, p = exp2(0) = 1.
++                    const float rescale = exp2f(row_max[r] - s[r]);
+                     row_max[r] = s[r];
+                     row_sum[r] *= rescale;
+ #pragma unroll
+                     for (int j = 0; j < D_PER_LANE; ++j) acc[r][j] *= rescale;
+                     p = 1.f;
+                 } else {
+-                    p = __expf(s[r] - row_max[r]);
++                    p = exp2f(s[r] - row_max[r]);
+                 }
+                 row_sum[r] += p;
+ #pragma unroll
+diff --git a/probe.cu b/probe.cu
+new file mode 100644
+index 0000000..800f903
+--- /dev/null
++++ b/probe.cu
+@@ -0,0 +1,166 @@
++// Probe: determine ldmatrix fragment mapping and mma correctness empirically.
++#include <cstdio>
++#include <cuda_runtime.h>
++#include <cstdint>
++#include <cstring>
++
++__device__ __host__ __forceinline__ unsigned bf16_bits(float x) {
++#if defined(__CUDA_ARCH__)
++    unsigned short u; __asm__("cvt.rn.bf16.f32 %0, %1;" : "=h"(u) : "f"(x)); return (unsigned)u;
++#else
++    unsigned short u; __asm__("cvt.rn.bf16.f32 %0, %1;" : "=h"(u) : "f"(x)); return (unsigned)u;
++#endif
++}
++
++__device__ __host__ __forceinline__ float bf16_to_f(unsigned b) {
++#if defined(__CUDA_ARCH__)
++    float f; __asm__("cvt.f32.bf16 %0, %1;" : "=f"(f) : "h"((unsigned short)b)); return f;
++#else
++    unsigned u = (b & 0x8000u) << 16;
++    unsigned e = (b >> 7) & 0xff;
++    unsigned m = b & 0x7f;
++    u |= (e << 23) | (m << 16);
++    float f; memcpy(&f, &u, 4); return f;
++#endif
++}
++
++// ---------------------------------------------------------------------------
++// Test 1: ldmatrix.x4 NON-trans on 4 matrices of 8 rows x 16B (8 bf16)
++// smem layout: matrix m at byte offset m*128, row r at +r*16, col c at +2c
++// ---------------------------------------------------------------------------
++__global__ void test_ldmatrix_x4(unsigned* out) {
++    __shared__ __align__(16) unsigned char sm[4 * 128];
++    for (int i = threadIdx.x; i < 4 * 128 / 4; i += blockDim.x) {
++        int byte = i * 4;
++        int m = byte / 128, r = (byte % 128) / 16, c = (byte % 16) / 2;
++        unsigned v = bf16_bits((float)(m * 100 + r * 10 + c)) |
++                     (bf16_bits((float)(m * 100 + r * 10 + c + 1)) << 16);
++        *(unsigned*)(sm + byte) = v;
++    }
++    __syncthreads();
++    int l = threadIdx.x % 32;
++    int m = l / 8, r = l % 8;
++    uint32_t addr = (uint32_t)__cvta_generic_to_shared(sm + m * 128 + r * 16);
++    uint32_t r0, r1, r2, r3;
++    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
++                 : "=r"(r0), "=r"(r1), "=r"(r2), "=r"(r3) : "r"(addr));
++    out[l * 4 + 0] = r0; out[l * 4 + 1] = r1; out[l * 4 + 2] = r2; out[l * 4 + 3] = r3;
++}
++
++// ---------------------------------------------------------------------------
++// Test 2: ldmatrix.x2 NON-trans and .trans
++// ---------------------------------------------------------------------------
++__global__ void test_ldmatrix_x2(unsigned* out, int trans) {
++    __shared__ __align__(16) unsigned char sm[2 * 128];
++    for (int i = threadIdx.x; i < 2 * 128 / 4; i += blockDim.x) {
++        int byte = i * 4;
++        int m = byte / 128, r = (byte % 128) / 16, c = (byte % 16) / 2;
++        unsigned v = bf16_bits((float)(m * 100 + r * 10 + c)) |
++                     (bf16_bits((float)(m * 100 + r * 10 + c + 1)) << 16);
++        *(unsigned*)(sm + byte) = v;
++    }
++    __syncthreads();
++    int l = threadIdx.x % 32;
++    int m = l / 8, r = l % 8;
++    if (m > 1) m = 1;  // only 2 matrices; duplicate matrix 1 addresses for lanes 16-31
++    uint32_t addr = (uint32_t)__cvta_generic_to_shared(sm + m * 128 + r * 16);
++    uint32_t r0, r1;
++    if (trans)
++        asm volatile("ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16 {%0,%1}, [%2];\n"
++                     : "=r"(r0), "=r"(r1) : "r"(addr));
++    else
++        asm volatile("ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0,%1}, [%2];\n"
++                     : "=r"(r0), "=r"(r1) : "r"(addr));
++    out[l * 4 + 0] = r0; out[l * 4 + 1] = r1; out[l * 4 + 2] = 0; out[l * 4 + 3] = 0;
++}
++
++// ---------------------------------------------------------------------------
++// Test 3: mma; verify S = Q(16x16) x Kt(16x8)
++// Q row-major [16][16] bf16 (32B rows); K row-major [8][16]
++// A frag: ldmatrix.x4 at 4 blocks of Q; B frag: ldmatrix.x2.trans at K
++// ---------------------------------------------------------------------------
++__global__ void test_mma(float* out) {
++    __shared__ __align__(16) unsigned char sq[16 * 32];
++    __shared__ __align__(16) unsigned char sk[8 * 32];
++    for (int i = threadIdx.x; i < 16 * 32 / 4; i += blockDim.x) {
++        int byte = i * 4;
++        int r = byte / 32, c = (byte % 32) / 2;
++        unsigned v = bf16_bits((float)(r * 16 + c)) | (bf16_bits((float)(r * 16 + c + 1)) << 16);
++        *(unsigned*)(sq + byte) = v;
++    }
++    for (int i = threadIdx.x; i < 8 * 32 / 4; i += blockDim.x) {
++        int byte = i * 4;
++        int r = byte / 32, c = (byte % 32) / 2;
++        unsigned v = bf16_bits((float)(100 + r * 16 + c)) | (bf16_bits((float)(100 + r * 16 + c + 1)) << 16);
++        *(unsigned*)(sk + byte) = v;
++    }
++    __syncthreads();
++    int l = threadIdx.x % 32;
++    int m = l / 8, r = l % 8;
++    // A: M0=Q rows0-7 cols0-7; M1=rows0-7 cols8-15; M2=rows8-15 cols0-7; M3=rows8-15 cols8-15
++    int qrow = (m >= 2 ? 8 : 0) + r;
++    int qcol = (m & 1) ? 8 : 0;
++    uint32_t addr_a = (uint32_t)__cvta_generic_to_shared(sq + qrow * 32 + qcol * 2);
++    uint32_t a[4];
++    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
++                 : "=r"(a[0]), "=r"(a[1]), "=r"(a[2]), "=r"(a[3]) : "r"(addr_a));
++    // B: x2.trans at K rows0-7: M0 = cols0-7, M1 = cols8-15
++    uint32_t addr_b = (uint32_t)__cvta_generic_to_shared(sk + r * 32 + (m & 1) * 16);
++    uint32_t b[2];
++    asm volatile("ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16 {%0,%1}, [%2];\n"
++                 : "=r"(b[0]), "=r"(b[1]) : "r"(addr_b));
++    float d[4] = {0.f, 0.f, 0.f, 0.f};
++    asm volatile(
++        "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
++        "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%11,%12,%13};\n"
++        : "=f"(d[0]), "=f"(d[1]), "=f"(d[2]), "=f"(d[3])
++        : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b[0]), "r"(b[1]),
++          "f"(0.f), "f"(0.f), "f"(0.f), "f"(0.f));
++    out[l * 4 + 0] = d[0]; out[l * 4 + 1] = d[1]; out[l * 4 + 2] = d[2]; out[l * 4 + 3] = d[3];
++}
++
++int main() {
++    unsigned* dout; cudaMalloc(&dout, 32 * 4 * 4);
++    test_ldmatrix_x4<<<1, 32>>>(dout);
++    unsigned h1[128]; cudaMemcpy(h1, dout, 128 * 4, cudaMemcpyDeviceToHost);
++    printf("=== ldmatrix.x4 NON-trans: lane l: r0=(a,b) r1=(c,d) r2=(e,f) r3=(g,h) ===\n");
++    for (int l = 0; l < 32; ++l)
++        printf("l%2d: r0=(%3.0f,%3.0f) r1=(%3.0f,%3.0f) r2=(%3.0f,%3.0f) r3=(%3.0f,%3.0f)\n", l,
++               bf16_to_f(h1[l*4] & 0xffff), bf16_to_f(h1[l*4] >> 16),
++               bf16_to_f(h1[l*4+1] & 0xffff), bf16_to_f(h1[l*4+1] >> 16),
++               bf16_to_f(h1[l*4+2] & 0xffff), bf16_to_f(h1[l*4+2] >> 16),
++               bf16_to_f(h1[l*4+3] & 0xffff), bf16_to_f(h1[l*4+3] >> 16));
++    test_ldmatrix_x2<<<1, 32>>>(dout, 1);
++    cudaMemcpy(h1, dout, 128 * 4, cudaMemcpyDeviceToHost);
++    printf("\n=== ldmatrix.x2 TRANS ===\n");
++    for (int l = 0; l < 32; ++l)
++        printf("l%2d: r0=(%3.0f,%3.0f) r1=(%3.0f,%3.0f)\n", l,
++               bf16_to_f(h1[l*4] & 0xffff), bf16_to_f(h1[l*4] >> 16),
++               bf16_to_f(h1[l*4+1] & 0xffff), bf16_to_f(h1[l*4+1] >> 16));
++    test_ldmatrix_x2<<<1, 32>>>(dout, 0);
++    cudaMemcpy(h1, dout, 128 * 4, cudaMemcpyDeviceToHost);
++    printf("\n=== ldmatrix.x2 NON-trans ===\n");
++    for (int l = 0; l < 32; ++l)
++        printf("l%2d: r0=(%3.0f,%3.0f) r1=(%3.0f,%3.0f)\n", l,
++               bf16_to_f(h1[l*4] & 0xffff), bf16_to_f(h1[l*4] >> 16),
++               bf16_to_f(h1[l*4+1] & 0xffff), bf16_to_f(h1[l*4+1] >> 16));
++    float* df; cudaMalloc(&df, 32 * 4 * 4);
++    test_mma<<<1, 32>>>(df);
++    float hf[128]; cudaMemcpy(hf, df, 128 * 4, cudaMemcpyDeviceToHost);
++    printf("\n=== mma D regs (lane l: d0,d1 = row l/4 cols 2*(l%%4),+1 ; d2,d3 = row l/4+8) ===\n");
++    for (int l = 0; l < 32; ++l)
++        printf("l%2d: %8.1f %8.1f %8.1f %8.1f\n", l, hf[l*4], hf[l*4+1], hf[l*4+2], hf[l*4+3]);
++    printf("--- reference ---\n");
++    for (int l = 0; l < 32; ++l) {
++        int r = l / 4, c0 = 2 * (l % 4);
++        float s0 = 0, s1 = 0, s2 = 0, s3 = 0;
++        for (int k = 0; k < 16; ++k) {
++            s0 += (r*16+k) * (100 + c0*16 + k);
++            s1 += (r*16+k) * (100 + (c0+1)*16 + k);
++            s2 += ((r+8)*16+k) * (100 + c0*16 + k);
++            s3 += ((r+8)*16+k) * (100 + (c0+1)*16 + k);
++        }
++        printf("l%2d: %8.1f %8.1f %8.1f %8.1f\n", l, s0, s1, s2, s3);
++    }
++    return 0;
++}

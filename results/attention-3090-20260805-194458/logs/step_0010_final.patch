@@ -1,0 +1,205 @@
+diff --git a/local_test.py b/local_test.py
+index 3ddff62..2452c76 100644
+--- a/local_test.py
++++ b/local_test.py
+@@ -14,7 +14,6 @@ mod = load_inline(
+     name='attention',
+     cpp_sources=[src_cpp],
+     cuda_sources=[src_cuda],
+-    functions=['attention_forward'],
+     with_cuda=True,
+     extra_cuda_cflags=['-gencode', 'arch=compute_86,code=sm_86'] + extra_flags,
+     verbose=False,
+diff --git a/probe_layout.cu b/probe_layout.cu
+new file mode 100644
+index 0000000..d257c1b
+--- /dev/null
++++ b/probe_layout.cu
+@@ -0,0 +1,187 @@
++// Probe: verify mma.m16n8k16 bf16 fragment layouts + ldmatrix feeding.
++// Test 1: hand-built fragments per hypothesis -> mma -> check D layout.
++// Test 2: ldmatrix.x4 from row-major 16x16 smem -> A-frag.
++// Test 3: ldmatrix.x2.trans from K^T (k-major) smem -> B-frag for B=K^T.
++// Test 4: ldmatrix.x2.trans from V (n-major) smem -> B-frag for B=V.
++#include <cuda_runtime.h>
++#include <cuda_bf16.h>
++#include <stdio.h>
++#include <stdint.h>
++#include <math.h>
++
++#define CHECK(cond) do { if (!(cond)) { printf("FAIL line %d\n", __LINE__); errors++; } } while (0)
++
++__device__ __forceinline__ uint32_t pack2(__nv_bfloat16 a, __nv_bfloat16 b) {
++    return (uint32_t)__bfloat16_as_ushort(a) | ((uint32_t)__bfloat16_as_ushort(b) << 16);
++}
++
++__device__ __forceinline__ void ldmatrix_x4(uint32_t r[4], const void* p) {
++    uint32_t a = (uint32_t)__cvta_generic_to_shared(p);
++    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
++                 : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]) : "r"(a));
++}
++__device__ __forceinline__ void ldmatrix_x2(uint32_t r[2], const void* p) {
++    uint32_t a = (uint32_t)__cvta_generic_to_shared(p);
++    asm volatile("ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0,%1}, [%2];\n"
++                 : "=r"(r[0]), "=r"(r[1]) : "r"(a));
++}
++__device__ __forceinline__ void ldmatrix_x2_trans(uint32_t r[2], const void* p) {
++    uint32_t a = (uint32_t)__cvta_generic_to_shared(p);
++    asm volatile("ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16 {%0,%1}, [%2];\n"
++                 : "=r"(r[0]), "=r"(r[1]) : "r"(a));
++}
++__device__ __forceinline__ void mma16n8k16(float d[4], const uint32_t a[4], const uint32_t b[2], const float c[4]) {
++    asm volatile(
++        "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
++        "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%11,%12,%13};\n"
++        : "=f"(d[0]), "=f"(d[1]), "=f"(d[2]), "=f"(d[3])
++        : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]),
++          "r"(b[0]), "r"(b[1]),
++          "f"(c[0]), "f"(c[1]), "f"(c[2]), "f"(c[3]));
++}
++
++__global__ void probe1(const __nv_bfloat16* gA, const __nv_bfloat16* gB, float* gD, int* errs) {
++    int l = threadIdx.x % 32;
++    int c = l % 4, r4 = l / 4;
++    uint32_t a[4], b[2];
++    a[0] = pack2(gA[r4*16 + 2*c],   gA[r4*16 + 2*c+1]);
++    a[1] = pack2(gA[(r4+8)*16 + 2*c], gA[(r4+8)*16 + 2*c+1]);
++    a[2] = pack2(gA[r4*16 + 2*c+8], gA[r4*16 + 2*c+9]);
++    a[3] = pack2(gA[(r4+8)*16 + 2*c+8], gA[(r4+8)*16 + 2*c+9]);
++    b[0] = pack2(gB[(2*c)*8 + l/4],   gB[(2*c+1)*8 + l/4]);
++    b[1] = pack2(gB[(2*c+8)*8 + l/4], gB[(2*c+9)*8 + l/4]);
++    float d[4] = {0.f, 0.f, 0.f, 0.f};
++    mma16n8k16(d, a, b, d);
++    // each lane computes its own reference for rows r4, r4+8 and cols 2c, 2c+1
++    float e[4];
++    for (int t = 0; t < 4; t++) {
++        int rr = (t >= 2) ? r4 + 8 : r4;
++        int cc = (t & 1) ? 2*c + 1 : 2*c;
++        float s = 0;
++        for (int k = 0; k < 16; k++)
++            s += __bfloat162float(gA[rr*16+k]) * __bfloat162float(gB[k*8+cc]);
++        e[t] = s;
++    }
++    int bad = 0;
++    for (int i = 0; i < 4; i++)
++        if (fabsf(d[i] - e[i]) > 0.5f) bad++;
++    if (bad && threadIdx.x < 32) {
++        printf("T1 lane %d: d=(%.1f %.1f %.1f %.1f) want=(%.1f %.1f %.1f %.1f)\n",
++               l, d[0], d[1], d[2], d[3], e[0], e[1], e[2], e[3]);
++    }
++    if (bad) atomicAdd(errs, 1);
++}
++
++// T2: A-frag from smem row-major 16x16 (blocks: (r0-7,c0-7),(r0-7,c8-15),(r8-15,c0-7),(r8-15,c8-15))
++__global__ void probe2(const __nv_bfloat16* gA, float* gD, int* errs) {
++    __shared__ __nv_bfloat16 s[16][16];
++    for (int i = threadIdx.x; i < 256; i += 32) s[i/16][i%16] = gA[i];
++    __syncthreads();
++    int l = threadIdx.x % 32;
++    uint32_t r[4];
++    // lane l: matrix l/8, row l%8. matrices in order: b0=(r0-7,c0-7) b1=(r0-7,c8-15) b2=(r8-15,c0-7) b3=(r8-15,c8-15)
++    int m = l / 8, row = l % 8;
++    const __nv_bfloat16* p = &s[(m & 2) ? 8 + row : row][(m & 1) ? 8 : 0];
++    ldmatrix_x4(r, p);
++    int c = l % 4, r4 = l / 4;
++    uint16_t h[8];
++    for (int i = 0; i < 4; i++) { h[2*i] = r[i] & 0xffff; h[2*i+1] = r[i] >> 16; }
++    // hypothesis: r0=(r4,2c),(r4,2c+1); r1=(r4,2c+8),(r4,2c+9); r2=(r4+8,2c),(r4+8,2c+1); r3=(r4+8,2c+8),(r4+8,2c+9)
++    uint16_t want[8] = {
++        __bfloat16_as_ushort(gA[r4*16+2*c]), __bfloat16_as_ushort(gA[r4*16+2*c+1]),
++        __bfloat16_as_ushort(gA[r4*16+2*c+8]), __bfloat16_as_ushort(gA[r4*16+2*c+9]),
++        __bfloat16_as_ushort(gA[(r4+8)*16+2*c]), __bfloat16_as_ushort(gA[(r4+8)*16+2*c+1]),
++        __bfloat16_as_ushort(gA[(r4+8)*16+2*c+8]), __bfloat16_as_ushort(gA[(r4+8)*16+2*c+9])};
++    int bad = 0;
++    for (int i = 0; i < 8; i++) if (h[i] != want[i]) bad++;
++    if (bad && l < 32) {
++        printf("T2 lane %d: got %d %d %d %d %d %d %d %d\n", l, h[0],h[1],h[2],h[3],h[4],h[5],h[6],h[7]);
++        printf("         want %d %d %d %d %d %d %d %d\n", want[0],want[1],want[2],want[3],want[4],want[5],want[6],want[7]);
++    }
++    if (bad) atomicAdd(errs, 1);
++}
++
++// T3: B-frag from K^T stored k-major 16x8 in smem via ldmatrix.trans.x2
++__global__ void probe3(const __nv_bfloat16* gK, float* gD, int* errs) {
++    // gK: 8 x 16 (n x k). store transposed: s[k][n] = K[n][k]
++    __shared__ __nv_bfloat16 s[16][8];
++    for (int i = threadIdx.x; i < 128; i += 32) {
++        int k = i / 8, n = i % 8;
++        s[k][n] = gK[n*16 + k];
++    }
++    __syncthreads();
++    int l = threadIdx.x % 32;
++    uint32_t r[2];
++    // 2 matrices: m0=(k0-7,n0-7) m1=(k8-15,n0-7). lane l: matrix l/8, row l%8 (k-row)
++    int m = l / 8, row = l % 8;
++    ldmatrix_x2_trans(r, &s[m*8 + row][0]);
++    int c = l % 4;
++    uint16_t h[4];
++    h[0] = r[0] & 0xffff; h[1] = r[0] >> 16; h[2] = r[1] & 0xffff; h[3] = r[1] >> 16;
++    // hypothesis: r0 = (K^T[2c][l/4], K^T[2c+1][l/4]) = (K[l/4][2c], K[l/4][2c+1])
++    //             r1 = (K^T[2c+8][l/4], K^T[2c+9][l/4]) = (K[l/4][2c+8], K[l/4][2c+9])
++    uint16_t want[4] = {
++        __bfloat16_as_ushort(gK[(l/4)*16 + 2*c]), __bfloat16_as_ushort(gK[(l/4)*16 + 2*c+1]),
++        __bfloat16_as_ushort(gK[(l/4)*16 + 2*c+8]), __bfloat16_as_ushort(gK[(l/4)*16 + 2*c+9])};
++    int bad = 0;
++    for (int i = 0; i < 4; i++) if (h[i] != want[i]) bad++;
++    if (bad && l < 32) {
++        printf("T3 lane %d: got %d %d %d %d\n", l, h[0],h[1],h[2],h[3]);
++        printf("         want %d %d %d %d\n", want[0],want[1],want[2],want[3]);
++    }
++    if (bad) atomicAdd(errs, 1);
++}
++
++// T4: B-frag from V stored n-major 16x8 in smem via ldmatrix.trans.x2
++__global__ void probe4(const __nv_bfloat16* gV, float* gD, int* errs) {
++    __shared__ __nv_bfloat16 s[16][8];
++    for (int i = threadIdx.x; i < 128; i += 32) s[i/8][i%8] = gV[i];
++    __syncthreads();
++    int l = threadIdx.x % 32;
++    uint32_t r[2];
++    int m = l / 8, row = l % 8;
++    ldmatrix_x2_trans(r, &s[m*8 + row][0]);
++    int c = l % 4;
++    uint16_t h[4];
++    h[0] = r[0] & 0xffff; h[1] = r[0] >> 16; h[2] = r[1] & 0xffff; h[3] = r[1] >> 16;
++    // hypothesis: r0 = (V[2c][l/4], V[2c+1][l/4]); r1 = (V[2c+8][l/4], V[2c+9][l/4])
++    uint16_t want[4] = {
++        __bfloat16_as_ushort(gV[(2*c)*8 + l/4]), __bfloat16_as_ushort(gV[(2*c+1)*8 + l/4]),
++        __bfloat16_as_ushort(gV[(2*c+8)*8 + l/4]), __bfloat16_as_ushort(gV[(2*c+9)*8 + l/4])};
++    int bad = 0;
++    for (int i = 0; i < 4; i++) if (h[i] != want[i]) bad++;
++    if (bad && l < 32) {
++        printf("T4 lane %d: got %d %d %d %d\n", l, h[0],h[1],h[2],h[3]);
++        printf("         want %d %d %d %d\n", want[0],want[1],want[2],want[3]);
++    }
++    if (bad) atomicAdd(errs, 1);
++}
++
++int main() {
++    int errors = 0;
++    __nv_bfloat16 hA[256], hB[128], hK[128], hV[128];
++    for (int i = 0; i < 16; i++)
++        for (int j = 0; j < 16; j++) hA[i*16+j] = __float2bfloat16((float)(100 + i*16 + j));
++    for (int i = 0; i < 16; i++)
++        for (int j = 0; j < 8; j++) { hB[i*8+j] = __float2bfloat16((float)(200 + i*8 + j)); hV[i*8+j] = __float2bfloat16((float)(300 + i*8 + j)); }
++    for (int n = 0; n < 8; n++)
++        for (int k = 0; k < 16; k++) hK[n*16+k] = __float2bfloat16((float)(400 + n*16 + k));
++
++    __nv_bfloat16 *dA, *dB, *dK, *dV; float *dD; int *dE;
++    cudaMalloc(&dA, 256*2); cudaMalloc(&dB, 128*2); cudaMalloc(&dK, 128*2); cudaMalloc(&dV, 128*2);
++    cudaMalloc(&dD, 128*4); cudaMalloc(&dE, 4);
++    cudaMemcpy(dA, hA, 256*2, cudaMemcpyHostToDevice);
++    cudaMemcpy(dB, hB, 128*2, cudaMemcpyHostToDevice);
++    cudaMemcpy(dK, hK, 128*2, cudaMemcpyHostToDevice);
++    cudaMemcpy(dV, hV, 128*2, cudaMemcpyHostToDevice);
++    cudaMemset(dE, 0, 4);
++
++    probe1<<<1,32>>>(dA, dB, dD, dE);
++    probe2<<<1,32>>>(dA, dD, dE);
++    probe3<<<1,32>>>(dK, dD, dE);
++    probe4<<<1,32>>>(dV, dD, dE);
++    cudaDeviceSynchronize();
++    cudaMemcpy(&errors, dE, 4, cudaMemcpyDeviceToHost);
++    printf(errors == 0 ? "ALL LAYOUT PROBES PASSED\n" : "PROBE FAILURES: %d\n", errors);
++    return errors ? 1 : 0;
++}

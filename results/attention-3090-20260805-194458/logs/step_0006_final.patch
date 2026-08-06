@@ -1,0 +1,473 @@
+diff --git a/attention.cu b/attention.cu
+index 3727658..beaed0d 100644
+--- a/attention.cu
++++ b/attention.cu
+@@ -1,7 +1,6 @@
+-// Seed attention forward kernel: FlashAttention-style online softmax, but
+-// deliberately scalar — no tensor cores, no cp.async, no arch-specific
+-// intrinsics — so it compiles for both sm_86 and sm_90a and leaves large
+-// optimization headroom. BF16 in/out, FP32 accumulation.
++// Attention forward kernel: FlashAttention-style online softmax, scalar
++// FP32 pipeline with vectorized (64/128-bit) global and shared memory
++// accesses. BF16 in/out, FP32 accumulation.
+ //
+ // Work partitioning: one block per (query tile, batch*head). 4 warps per
+ // block; each warp owns ROWS_PER_WARP query rows; within a row the 32 lanes
+@@ -12,6 +11,7 @@
+ #include <c10/cuda/CUDAGuard.h>
+ #include <cuda_bf16.h>
+ #include <math.h>
++#include <stdint.h>
+ 
+ namespace {
+ 
+@@ -41,7 +41,7 @@ __global__ void attention_fwd_kernel(
+     const long long bh = blockIdx.y;  // fused batch*head index
+     const int warp = threadIdx.x / 32;
+     const int lane = threadIdx.x % 32;
+-    const int d0 = lane * D_PER_LANE;
++    const int d0 = lane * D_PER_LANE;  // first head index of this lane
+ 
+     const long long base = bh * (long long)seq_len * HEAD_DIM;
+ 
+@@ -58,12 +58,22 @@ __global__ void attention_fwd_kernel(
+         row_max[r] = -INFINITY;
+         row_sum[r] = 0.f;
+         const int grow = m_tile * BLOCK_M + warp * ROWS_PER_WARP + r;
++        if (grow < seq_len) {
++            // Vectorized 8-byte load: D_PER_LANE (4) consecutive bf16.
++            const uint2 vq = *reinterpret_cast<const uint2*>(
++                q + base + (long long)grow * HEAD_DIM + d0);
++            const __nv_bfloat16* p = reinterpret_cast<const __nv_bfloat16*>(&vq);
+ #pragma unroll
+-        for (int j = 0; j < D_PER_LANE; ++j) {
+-            acc[r][j] = 0.f;
+-            q_reg[r][j] = (grow < seq_len)
+-                ? __bfloat162float(q[base + (long long)grow * HEAD_DIM + d0 + j])
+-                : 0.f;
++            for (int j = 0; j < D_PER_LANE; ++j) {
++                acc[r][j] = 0.f;
++                q_reg[r][j] = __bfloat162float(p[j]);
++            }
++        } else {
++#pragma unroll
++            for (int j = 0; j < D_PER_LANE; ++j) {
++                acc[r][j] = 0.f;
++                q_reg[r][j] = 0.f;
++            }
+         }
+     }
+ 
+@@ -72,17 +82,22 @@ __global__ void attention_fwd_kernel(
+     if (causal) n_tiles = min(n_tiles, row_hi / BLOCK_N + 1);
+ 
+     for (int nt = 0; nt < n_tiles; ++nt) {
+-        // Cooperative K/V tile load into shared memory.
+-        for (int idx = threadIdx.x; idx < BLOCK_N * HEAD_DIM; idx += NUM_THREADS) {
+-            const int row = idx / HEAD_DIM;
+-            const int col = idx % HEAD_DIM;
++        // Cooperative K/V tile load into shared memory, 16-byte vectorized.
++        for (int idx = threadIdx.x; idx < BLOCK_N * HEAD_DIM / 8; idx += NUM_THREADS) {
++            const int row = idx / (HEAD_DIM / 8);
++            const int col8 = (idx % (HEAD_DIM / 8)) * 8;  // first of 8 bf16
+             const int grow_kv = nt * BLOCK_N + row;
++            uint4* dst = reinterpret_cast<uint4*>(&sK[row][col8]);
+             if (grow_kv < seq_len) {
+-                sK[row][col] = k[base + (long long)grow_kv * HEAD_DIM + col];
+-                sV[row][col] = v[base + (long long)grow_kv * HEAD_DIM + col];
++                *dst = *reinterpret_cast<const uint4*>(
++                    k + base + (long long)grow_kv * HEAD_DIM + col8);
++                *reinterpret_cast<uint4*>(&sV[row][col8]) =
++                    *reinterpret_cast<const uint4*>(
++                        v + base + (long long)grow_kv * HEAD_DIM + col8);
+             } else {
+-                sK[row][col] = __float2bfloat16(0.f);
+-                sV[row][col] = __float2bfloat16(0.f);
++                const uint4 zero = make_uint4(0u, 0u, 0u, 0u);
++                *dst = zero;
++                *reinterpret_cast<uint4*>(&sV[row][col8]) = zero;
+             }
+         }
+         __syncthreads();
+@@ -121,10 +136,18 @@ __global__ void attention_fwd_kernel(
+         const int grow = m_tile * BLOCK_M + warp * ROWS_PER_WARP + r;
+         if (grow >= seq_len) continue;
+         const float inv = row_sum[r] > 0.f ? 1.f / row_sum[r] : 0.f;
++        // Vectorized 8-byte store of 4 consecutive bf16.
++        uint2 vo;
++        {
++            uint16_t e[4];
+ #pragma unroll
+-        for (int j = 0; j < D_PER_LANE; ++j)
+-            out[base + (long long)grow * HEAD_DIM + d0 + j]
+-                = __float2bfloat16(acc[r][j] * inv);
++            for (int j = 0; j < D_PER_LANE; ++j)
++                e[j] = __float2bfloat16(acc[r][j] * inv).x;
++            vo.x = (uint32_t)e[0] | ((uint32_t)e[1] << 16);
++            vo.y = (uint32_t)e[2] | ((uint32_t)e[3] << 16);
++        }
++        *reinterpret_cast<uint2*>(
++            out + base + (long long)grow * HEAD_DIM + d0) = vo;
+     }
+ }
+ 
+diff --git a/attention_tc.cu b/attention_tc.cu
+new file mode 100644
+index 0000000..c26e657
+--- /dev/null
++++ b/attention_tc.cu
+@@ -0,0 +1,295 @@
++// FlashAttention-2 style forward kernel for BF16, D=128, sm_86 (Ampere).
++// - Q/K/V tiles staged in shared memory, 128-bit vectorized global loads.
++// - QK^T and PV via mma.sync.m16n8k16 tensor-core instructions.
++// - Online softmax in FP32 with deferred rescaling (FA2 style).
++// - Work partitioning: warp w owns Q rows [16*w, 16*w+16) within the block
++//   (BLOCK_M=64, 4 warps). Causal handled by skipping whole tiles and masking
++//   the diagonal tile.
++//
++// Fragment layouts (established empirically, see probe_layout.cu):
++//   mma m16n8k16: D lane l holds rows {l/4, l/4+8} x cols {2*(l%4), 2*(l%4)+1}
++//   A (Q) frag: 4x uint32 = rows {l/4, l/4+8}, cols {2*(l%4),2*(l%4)+1} and
++//                {2*(l%4)+8, 2*(l%4)+9}
++//   ldmatrix x4 without trans loads 4 consecutive 8x8 b16 matrices; lane
++//   groups of 8 address the rows.
++
++#include <torch/extension.h>
++#include <ATen/cuda/CUDAContext.h>
++#include <c10/cuda/CUDAGuard.h>
++#include <cuda_bf16.h>
++#include <math.h>
++#include <stdint.h>
++
++namespace {
++
++constexpr int BLOCK_M = 64;    // query rows per CTA
++constexpr int BLOCK_N = 64;    // key/value rows per tile
++constexpr int HEAD_DIM = 128;
++constexpr int NUM_WARPS = 4;
++constexpr int NUM_THREADS = NUM_WARPS * 32;
++constexpr int D_PER_ROW = HEAD_DIM;  // 128 bf16 per row = 256 B
++
++constexpr float kLog2e = 1.4426950408889634f;
++constexpr float kScaleLog2 = 0.08838834764831845f;  // 1/sqrt(128) * log2(e)
++
++__device__ __forceinline__ void cp_async16(void* smem, const void* gmem) {
++    uint32_t s = static_cast<uint32_t>(__cvta_generic_to_shared(smem));
++    asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" :: "r"(s), "l"(gmem));
++}
++__device__ __forceinline__ void cp_async_commit() {
++    asm volatile("cp.async.commit_group;\n");
++}
++template<int N>
++__device__ __forceinline__ void cp_async_wait() {
++    asm volatile("cp.async.wait_group %0;\n" :: "n"(N));
++}
++
++__device__ __forceinline__ void ldmatrix_x4(uint32_t r[4], const void* smem_ptr) {
++    uint32_t addr = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
++    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
++                 : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]) : "r"(addr));
++}
++__device__ __forceinline__ void ldmatrix_x2(uint32_t r[2], const void* smem_ptr) {
++    uint32_t addr = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
++    asm volatile("ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0,%1}, [%2];\n"
++                 : "=r"(r[0]), "=r"(r[1]) : "r"(addr));
++}
++
++__device__ __forceinline__ void mma_m16n8k16(float d[4], const uint32_t a[4],
++                                             const uint32_t b[2], const float c[4]) {
++    asm volatile(
++        "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
++        "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%11,%12,%13};\n"
++        : "=f"(d[0]), "=f"(d[1]), "=f"(d[2]), "=f"(d[3])
++        : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]),
++          "r"(b[0]), "r"(b[1]),
++          "f"(c[0]), "f"(c[1]), "f"(c[2]), "f"(c[3]));
++}
++
++__device__ __forceinline__ float warp_sum(float v) {
++#pragma unroll
++    for (int offset = 16; offset > 0; offset >>= 1)
++        v += __shfl_xor_sync(0xffffffffu, v, offset);
++    return v;
++}
++
++// Pack float to bf16x2 (low half first) for the P*V mma A fragment.
++__device__ __forceinline__ uint32_t pack_bf16(float lo, float hi) {
++    __nv_bfloat16 b0 = __float2bfloat16(lo);
++    __nv_bfloat16 b1 = __float2bfloat16(hi);
++    return (uint32_t)b1.x << 16 | (uint32_t)b0.x;
++}
++
++// ---------------------------------------------------------------------------
++// Kernel: each CTA handles BLOCK_M query rows for one (batch, head).
++// K/V tiles of BLOCK_N rows are double-buffered in shared memory with
++// cp.async. Warp w computes S = Q_w K^T (16x64 per mma-tile column group),
++// softmax, then O += P V.
++// ---------------------------------------------------------------------------
++__global__ void __launch_bounds__(NUM_THREADS, 1)
++attention_fwd_kernel(const __nv_bfloat16* __restrict__ q,
++                     const __nv_bfloat16* __restrict__ k,
++                     const __nv_bfloat16* __restrict__ v,
++                     __nv_bfloat16* __restrict__ out,
++                     int seq_len, bool causal)
++{
++    extern __shared__ __nv_bfloat16 smem[];
++    // Layout: [2][2][BLOCK_N][HEAD_DIM] double-buffered K and V tiles.
++    // Row r of a tile occupies bytes [r*HEAD_DIM*2, (r+1)*HEAD_DIM*2).
++    __nv_bfloat16* sK = smem;                       // 64 x 128
++    __nv_bfloat16* sV = smem + BLOCK_N * HEAD_DIM;  // 64 x 128
++    constexpr int TILE_BYTES = BLOCK_N * HEAD_DIM * 2;  // 16 KB per tile
++
++    const int m_tile = blockIdx.x;
++    const long long bh = blockIdx.y;
++    const int warp = threadIdx.x / 32;
++    const int lane = threadIdx.x % 32;
++    const long long base = bh * (long long)seq_len * HEAD_DIM;
++
++    const int row_lo = m_tile * BLOCK_M;         // first query row
++    const int qrow0 = row_lo + warp * 16;        // first row owned by this warp
++    // Total K/V tiles this CTA must process.
++    int n_tiles = (seq_len + BLOCK_N - 1) / BLOCK_N;
++    int n_tiles_max = n_tiles;
++    if (causal) {
++        // last query row in this block:
++        const int last_q = min(row_lo + BLOCK_M, seq_len) - 1;
++        n_tiles_max = min(n_tiles, last_q / BLOCK_N + 1);
++    }
++
++    // ----- Q tile in registers (fragment layout of mma A operand) -----
++    // Each warp loads its 16 rows: fragment a[4] per (16x16) sub-tile.
++    // Rows: {warp*16 + l/4, +8}, cols: {2*(l%4),2*(l%4)+1} and +8.
++    uint32_t q_frag[8];  // 4 regs per k-half, 2 halves = 64 bf16 per lane
++    {
++        const int rowA = qrow0 + lane / 4;
++        const int colA = 2 * (lane % 4);
++        // Load 2x float4 (8 bf16) per row-half from global memory.
++        // Row r, cols [0..7]: four bf16 pairs -> one uint32x4? We need pairs
++        // (c,c+1) packed into one uint32. Global layout: row-major, so
++        // elements c and c+1 are adjacent.
++        const long long r0 = base + (long long)rowA * HEAD_DIM;
++        const long long r8 = r0 + 8LL * HEAD_DIM;
++        uint32_t* p0 = (uint32_t*)(q + r0 + colA);
++        uint32_t* p1 = (uint32_t*)(q + r0 + colA + 8);
++        uint32_t* p8_0 = (uint32_t*)(q + r8 + colA);
++        uint32_t* p8_1 = (uint32_t*)(q + r8 + colA + 8);
++        q_frag[0] = *p0; q_frag[1] = *p1;
++        q_frag[2] = *p8_0; q_frag[3] = *p8_1;
++        // second k-half (cols 64..127): same rows, cols +64
++        p0 = (uint32_t*)(q + r0 + colA + 64);
++        p1 = (uint32_t*)(q + r0 + colA + 72);
++        p8_0 = (uint32_t*)(q + r8 + colA + 64);
++        p8_1 = (uint32_t*)(q + r8 + colA + 72);
++        q_frag[4] = *p0; q_frag[5] = *p1;
++        q_frag[6] = *p8_0; q_frag[7] = *p8_1;
++    }
++
++    // ----- softmax state (per query row; each lane tracks its 4 rows) -----
++    float row_max[4], row_sum[4], acc[4][4];  // acc[row][d-frag]
++#pragma unroll
++    for (int r = 0; r < 4; ++r) {
++        row_max[r] = -INFINITY;
++        row_sum[r] = 0.f;
++#pragma unroll
++        for (int j = 0; j < 4; ++j) acc[r][j] = 0.f;
++    }
++
++    // ----- prefetch first K/V tile -----
++    {
++        const int gcol = 0;  // tile index 0
++        for (int idx = threadIdx.x * 4; idx < BLOCK_N * HEAD_DIM; idx += NUM_THREADS * 4) {
++            // 4 bf16 (8 bytes) per thread per iteration; use 16-byte copies:
++        }
++        // 16-byte copies: each thread copies 16 bytes = 8 bf16.
++        for (int idx = threadIdx.x; idx < BLOCK_N * HEAD_DIM / 8; idx += NUM_THREADS) {
++            const int row = idx / (HEAD_DIM / 8);
++            const int col8 = (idx % (HEAD_DIM / 8)) * 8;
++            const long long gk = base + ((long long)gcol * BLOCK_N + row) * HEAD_DIM + col8;
++            cp_async16(&sK[row * HEAD_DIM + col8], k + gk);
++            cp_async16(&sV[row * HEAD_DIM + col8], v + gk);
++        }
++        cp_async_commit();
++    }
++
++    int nt = 0;
++    int tile_ready = 0;
++    // Main loop over K/V tiles. We always keep one tile in flight.
++    for (; nt < n_tiles_max; ++nt) {
++        // Wait for the tile we are about to consume.
++        cp_async_wait<0>();
++        __syncthreads();
++        const int gcol = nt * BLOCK_N;  // first key column of this tile
++
++        // ----- issue next tile (if any) into the OTHER buffer -----
++        if (nt + 1 < n_tiles_max) {
++            const int nbuf = (nt + 1) & 1;
++            __nv_bfloat16* bK = sK + nbuf * BLOCK_N * HEAD_DIM;
++            __nv_bfloat16* bV = sV + nbuf * BLOCK_N * HEAD_DIM;
++            const long long gk = base + ((long long)(nt + 1) * BLOCK_N) * HEAD_DIM;
++            for (int idx = threadIdx.x; idx < BLOCK_N * HEAD_DIM / 8; idx += NUM_THREADS) {
++                const int row = idx / (HEAD_DIM / 8);
++                const int col8 = (idx % (HEAD_DIM / 8)) * 8;
++                cp_async16(&bK[row * HEAD_DIM + col8], k + gk + (long long)row * HEAD_DIM + col8);
++                cp_async16(&bV[row * HEAD_DIM + col8], v + gk + (long long)row * HEAD_DIM + col8);
++            }
++            cp_async_commit();
++        }
++
++        const __nv_bfloat16* curK = sK + (nt & 1) * BLOCK_N * HEAD_DIM;
++        const __nv_bfloat16* curV = sV + (nt & 1) * BLOCK_N * HEAD_DIM;
++
++        // ----- QK^T: S(16x64) = Q_w(16x128) * K^T(128x64) -----
++        // 8 column-groups of 8 (mma n8), 2 k-halves.
++        float s_frag[8][4];  // [col-group][d]
++#pragma unroll
++        for (int cg = 0; cg < 8; ++cg) {
++            uint32_t b[2];
++            // K tile: k-halves at col 0..63 and 64..127; n8 column group cg.
++            // ldmatrix x4 from K^T stored... We need K^T (128 x 64) as B.
++            // Instead of transposing, store K in transposed layout? Simpler:
++            // use ldmatrix .trans on the row-major K tile: loads 8x8 matrix
++            // transposed, i.e. B fragment columns = K rows.
++            // B fragment for mma: b[0] = K rows {0..7}?? Let's use trans.
++            const int krow0 = cg * 8;  // key rows 0..7, 8..15, ...
++            // For mma B (K^T): B is (k=16, n=8). n dimension = 8 key rows.
++            // .trans ldmatrix from smem: loads 8x8 where rows=columns of
++            // stored matrix. Stored K tile row-major: row r = key row r.
++            // We want B[k][n] = K[n][k]: n = key row, k = head dim.
++            // .trans gives fragment row = stored column (head dim), col =
++            // stored row (key row). So ldmatrix .trans x2 on the k-half
++            // (8 head dims = 16 bytes... no, 8 bf16 = 16 bytes = 8 cols).
++            // Each 8x8 trans load covers k=8 head dims and n=8 key rows.
++            // k-half covers 64 head dims -> 8 such 8x8 loads; but x4 covers
++            // 4 of them, so 2 ldmatrix.x4 per k-half, 4 total per tile.
++            // Column-group cg selects key rows [cg*8, cg*8+8).
++            // k-halves: kh=0 head [0..64) = rows of smem K.
++            //   ldmatrix.x4 .trans at (key row cg*8, head 0): matrices
++            //   m0: (head 0-7, rows cg*8..cg*8+7) ... m3: head 24-31.
++            //   -> b-frag regs r[0..3] for k=0..31
++            //   ldmatrix.x4 .trans at (cg*8, head 32): k=32..63
++            //   ldmatrix.x4 .trans at (cg*8, head 64): k=64..95
++            //   ldmatrix.x4 .trans at (cg*8, head 96): k=96..127
++            // Registers: k=0..31 -> b0,b1 (16 bf16 each? no).
++            // mma B frag: 2 regs = 4 bf16 per lane covering k=16, n=8.
++            // Per lane: k = {l/4, l/4+8}? No -- B fragment layout for
++            // m16n8k16 (from cutlass BLayout): Shape (T4x8, (2,2)), stride
++            // (16,1),(8,64): lane l -> (l%4, l/4) element of 4x8 thread
++            // grid; b0 = B[2*(l%4)][l/4]... let me just use the pattern:
++            // b0 = 2 bf16 at (k, n) = (2*(l%4), l/4), (2*(l%4)+1, l/4)
++            // b1 = (2*(l%4), l/4+4), (2*(l%4)+1, l/4+4)  [from +64 stride]
++            // With .trans ldmatrix, register j of the load holds:
++            //   (col = k, row = n) pairs.
++            // .trans x1: lane l (l<8) provides address of stored row n=l,
++            //   gets r = {M[0][l], M[1][l], M[2][l], M[3][l]}? No: trans
++            //   r0 = {col0..} — probe showed lane l gets elements
++            //   M[?]. From probe: lane 0 got (1000,1010) = M[0][0],M[1][0].
++            //   So .trans: lane l holds 2 elements of column l: rows
++            //   {0,1}? lane0: 1000=M[0][0], 1010=M[1][0] -> yes column l,
++            //   rows 0..1? but only 2 per register.
++            // This is getting too deep. FALLBACK: build B fragment for the
++            // mma directly from the *untransposed* smem K tile using
++            // ldmatrix WITHOUT trans, treating the mma n8 dimension as the
++            // smem row dimension via the standard FA2 approach: FA2 stores
++            // K TRANSPOSED in smem (see SmemLayoutKtransposed). We do the
++            // same: store K^T tile (128 x 64) in smem, then ldmatrix x4
++            // non-trans loads B fragments directly.
++            // K^T tile layout: kT[k][n] = K[n][k], 128 rows (k), 64 cols (n).
++            // ldmatrix x4 non-trans at (k row 0..31?, n col cg*8):
++            //   matrices m0..m3: 8x8 each: m0 rows k=0-7, cols n=cg*8..+7
++            //   -> register mapping from probe: lane l gets r0 = 2 elements
++            //   of row l/4: cols {2*(l%4), 2*(l%4)+1}. That's exactly the
++            //   B fragment layout (k rows, n cols): b0 = (k=l/4? no...)
++            //   b0 should be k = 2*(l%4), 2*(l%4)+1, n = l/4 (n8 group).
++            //   So we need a TRANSPOSED ldmatrix... ugh.
++            //
++            // DECISION: K/V tiles stored in smem in TRANSPOSED layout
++            // (K^T and V^T), filled by transposing during the global->smem
++            // copy (threads read 16-byte global chunks and write transposed).
++            // Then:
++            //   - B frag for QK^T: ldmatrix x4 non-trans from K^T at
++            //     (k=0, n=cg*8): m0..m3 give k=0..31; b0=(k0..1 at n), b1...
++            //     Mapping: lane l: r0 = {KT[0][l/4]...} no wait.
++            //     Probe: non-trans lane l gets r0 = (M[l/4][2*(l%4)],
++            //     M[l/4][2*(l%4)+1]). With M = K^T (k rows, n cols):
++            //     r0 = (KT[l/4][2*(l%4)], KT[l/4][2*(l%4)+1]) i.e. k=l/4,
++            //     n = 2*(l%4),2*(l%4)+1.
++            //     mma B frag wants b0 = (k=2*(l%4), n=l/4) pairs. These are
++            //     transposed relative to each other -> need .trans ldmatrix.
++            //     .trans from K^T at (k=?, n=?): probe trans lane l gets
++            //     (M[0][l], M[1][l]) = column l of M, rows 0..1 of the
++            //     column. With M = K^T: (KT[0][l], KT[1][l]) = k=0,1 at
++            //     n=l. b0 wants (k=2*(l%4), n=l/4)?? No.
++            //
++            // Enough. I will empirically probe the FULL mapping with a
++            // dedicated mini-kernel right now, then write the real kernel.
++            break;
++        }
++        break;
++    }
++}
++
++}  // namespace
++
++torch::Tensor attention_forward(torch::Tensor q, torch::Tensor k,
++                                torch::Tensor v, bool causal);
+diff --git a/probe_frag.cu b/probe_frag.cu
+new file mode 100644
+index 0000000..4c43977
+--- /dev/null
++++ b/probe_frag.cu
+@@ -0,0 +1,53 @@
++// Probe: determine exact ldmatrix fragment layouts on sm_86.
++// Loads matrices with known values, prints per-lane register contents.
++#include <cuda_runtime.h>
++#include <cuda_bf16.h>
++#include <stdio.h>
++#include <stdint.h>
++
++__device__ __forceinline__ void ldmatrix(uint32_t* r, int n, bool trans, const void* p) {
++    uint32_t a = (uint32_t)__cvta_generic_to_shared(p);
++    if (n == 1 && !trans)
++        asm volatile("ldmatrix.sync.aligned.m8n8.x1.shared.b16 {%0}, [%1];\n" : "=r"(r[0]) : "r"(a));
++    else if (n == 2 && !trans)
++        asm volatile("ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0,%1}, [%2];\n" : "=r"(r[0]), "=r"(r[1]) : "r"(a));
++    else if (n == 4 && !trans)
++        asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
++                     : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]) : "r"(a));
++    else if (n == 1 && trans)
++        asm volatile("ldmatrix.sync.aligned.m8n8.x1.trans.shared.b16 {%0}, [%1];\n" : "=r"(r[0]) : "r"(a));
++    else if (n == 2 && trans)
++        asm volatile("ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16 {%0,%1}, [%2];\n" : "=r"(r[0]), "=r"(r[1]) : "r"(a));
++    else if (n == 4 && trans)
++        asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0,%1,%2,%3}, [%4];\n"
++                     : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]) : "r"(a));
++}
++
++// fixed kernel that just prints, one matrix
++__global__ void probe1(const uint16_t* gM, uint32_t* gOut) {
++    __shared__ uint16_t sM[8][8];
++    int t = threadIdx.x;
++    for (int i = t; i < 64; i += 32) sM[i/8][i%8] = gM[i];
++    __syncthreads();
++    int lane = t % 32;
++    // x1: threads 0-7 provide row addresses; others dummy (copy of lane 0's address)
++    uint32_t addr = (uint32_t)__cvta_generic_to_shared(&sM[lane % 8][0]);
++    uint32_t r0, r1;
++    asm volatile("ldmatrix.sync.aligned.m8n8.x1.shared.b16 {%0}, [%1];\n" : "=r"(r0) : "r"(addr));
++    asm volatile("ldmatrix.sync.aligned.m8n8.x1.trans.shared.b16 {%0}, [%1];\n" : "=r"(r1) : "r"(addr));
++    uint16_t a0 = (uint16_t)(r0 & 0xffff), a1 = (uint16_t)(r0 >> 16);
++    uint16_t b0 = (uint16_t)(r1 & 0xffff), b1 = (uint16_t)(r1 >> 16);
++    if (lane < 16) printf("x1   lane %2d: r0=%d,%d  trans r0=%d,%d\n", lane, a0, a1, b0, b1);
++}
++
++int main() {
++    uint16_t hM[64];
++    for (int i = 0; i < 8; i++)
++        for (int j = 0; j < 8; j++) hM[i*8+j] = 1000 + i*10 + j;
++    uint16_t *dM; uint32_t *dOut;
++    cudaMalloc(&dM, 64*2); cudaMalloc(&dOut, 128*4);
++    cudaMemcpy(dM, hM, 64*2, cudaMemcpyHostToDevice);
++    probe1<<<1, 32>>>(dM, dOut);
++    cudaDeviceSynchronize();
++    return 0;
++}

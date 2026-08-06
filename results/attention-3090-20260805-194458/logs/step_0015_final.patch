@@ -1,0 +1,63 @@
+diff --git a/attention.cu b/attention.cu
+index 42d6552..229e866 100644
+--- a/attention.cu
++++ b/attention.cu
+@@ -119,11 +119,18 @@ __global__ void attention_fwd_kernel(
+             if (gcol >= seq_len) break;                 // uniform across the warp
+             if (causal && gcol > grow_last) break;      // no row needs this col
+ 
+-            // Vectorized 8-byte shared reads for the 4 head elements.
++            // Vectorized 8-byte shared reads for the 4 head elements; convert
++            // once to FP32 (shared across all ROWS_PER_WARP rows).
+             const uint2 vk = *reinterpret_cast<const uint2*>(&sK[c][d0]);
+-            const __nv_bfloat16* pk = reinterpret_cast<const __nv_bfloat16*>(&vk);
+             const uint2 vv = *reinterpret_cast<const uint2*>(&sV[c][d0]);
++            const __nv_bfloat16* pk = reinterpret_cast<const __nv_bfloat16*>(&vk);
+             const __nv_bfloat16* pv = reinterpret_cast<const __nv_bfloat16*>(&vv);
++            float k_f[D_PER_LANE], v_f[D_PER_LANE];
++#pragma unroll
++            for (int j = 0; j < D_PER_LANE; ++j) {
++                k_f[j] = __bfloat162float(pk[j]);
++                v_f[j] = __bfloat162float(pv[j]);
++            }
+ 
+             float s[ROWS_PER_WARP];
+ #pragma unroll
+@@ -131,28 +138,23 @@ __global__ void attention_fwd_kernel(
+                 float partial = 0.f;
+ #pragma unroll
+                 for (int j = 0; j < D_PER_LANE; ++j)
+-                    partial += q_reg[r][j] * __bfloat162float(pk[j]);
++                    partial += q_reg[r][j] * k_f[j];
+                 s[r] = warp_sum(partial) * scale;
+             }
+ 
+-            // Online softmax at column granularity (tile size 1). Causal:
+-            // row grow may only attend columns gcol <= grow.
+-            float m_new[ROWS_PER_WARP], corr[ROWS_PER_WARP], p[ROWS_PER_WARP];
++            // Fused online softmax + output accumulation (tile size 1).
++            // Causal: row grow may only attend columns gcol <= grow.
+ #pragma unroll
+             for (int r = 0; r < ROWS_PER_WARP; ++r) {
+                 if (causal && (grow_first + r) < gcol) continue;  // row can't attend
+-                m_new[r] = fmaxf(row_max[r], s[r]);
+-                corr[r] = expf(row_max[r] - m_new[r]);
+-                p[r] = expf(s[r] - m_new[r]);
+-                row_sum[r] = row_sum[r] * corr[r] + p[r];
+-            }
+-#pragma unroll
+-            for (int r = 0; r < ROWS_PER_WARP; ++r) {
+-                if (causal && (grow_first + r) < gcol) continue;
++                const float m_new = fmaxf(row_max[r], s[r]);
++                const float corr = expf(row_max[r] - m_new);
++                const float p = expf(s[r] - m_new);
++                row_sum[r] = row_sum[r] * corr + p;
+ #pragma unroll
+                 for (int j = 0; j < D_PER_LANE; ++j)
+-                    acc[r][j] = acc[r][j] * corr[r] + p[r] * __bfloat162float(pv[j]);
+-                row_max[r] = m_new[r];
++                    acc[r][j] = acc[r][j] * corr + p * v_f[j];
++                row_max[r] = m_new;
+             }
+         }
+         __syncthreads();

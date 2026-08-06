@@ -1,0 +1,466 @@
+diff --git a/attention.cu b/attention.cu
+index dfeb953..c079177 100644
+--- a/attention.cu
++++ b/attention.cu
+@@ -142,19 +142,32 @@ __global__ void attention_fwd_kernel(
+                 s[r] = warp_sum(partial) * scale;
+             }
+ 
+-            // Fused online softmax + output accumulation (tile size 1).
++            // Fused online softmax + output accumulation (tile size 1),
++            // with FA2-style deferred rescaling: acc/sum are kept in the
++            // domain of the current running max m; only when a new row max
++            // arrives do we rescale history (rare for random scores, ~log S
++            // times per row). Steady state costs 1 expf + 1 FADD + 4 FFMA
++            // per (row, column) instead of 2 expf + corr rescale FMAs.
+             // Causal: row grow may only attend columns gcol <= grow.
+ #pragma unroll
+             for (int r = 0; r < ROWS_PER_WARP; ++r) {
+                 if (causal && (grow_first + r) < gcol) continue;  // row can't attend
+-                const float m_new = fmaxf(row_max[r], s[r]);
+-                const float corr = expf(row_max[r] - m_new);
+-                const float p = expf(s[r] - m_new);
+-                row_sum[r] = row_sum[r] * corr + p;
++                float p;
++                if (s[r] > row_max[r]) {
++                    // New running max: rescale history, p = exp(0) = 1.
++                    const float rescale = __expf(row_max[r] - s[r]);
++                    row_max[r] = s[r];
++                    row_sum[r] *= rescale;
++#pragma unroll
++                    for (int j = 0; j < D_PER_LANE; ++j) acc[r][j] *= rescale;
++                    p = 1.f;
++                } else {
++                    p = __expf(s[r] - row_max[r]);
++                }
++                row_sum[r] += p;
+ #pragma unroll
+                 for (int j = 0; j < D_PER_LANE; ++j)
+-                    acc[r][j] = acc[r][j] * corr + p * v_f[j];
+-                row_max[r] = m_new;
++                    acc[r][j] = fmaf(p, v_f[j], acc[r][j]);
+             }
+         }
+         __syncthreads();
+diff --git a/local_test.py b/local_test.py
+new file mode 100644
+index 0000000..e18b617
+--- /dev/null
++++ b/local_test.py
+@@ -0,0 +1,94 @@
++import os, sys, time
++import torch
++from torch.utils.cpp_extension import load_inline
++
++src_cuda = open('attention.cu').read()
++src_cpp = open('binding.cpp').read()
++
++extra_flags = []
++if os.path.exists('build_flags.json'):
++    import json
++    extra_flags = json.load(open('build_flags.json')).get('extra_cuda_cflags', [])
++
++mod = load_inline(
++    name='attention',
++    cpp_sources=[src_cpp],
++    cuda_sources=[src_cuda],
++    functions=['attention_forward'],
++    with_cuda=True,
++    extra_cuda_cflags=['-gencode', 'arch=compute_86,code=sm_86'] + extra_flags,
++    verbose=False,
++)
++
++def ref_attn(q, k, v, causal):
++    # q,k,v: [B,H,S,D] bf16 (k,v maybe [B,KVH,S,D])
++    B, H, S, D = q.shape
++    KVH = k.shape[1]
++    scale = D ** -0.5
++    qf = q.float()
++    kf = k.float()
++    vf = v.float()
++    out = torch.empty_like(qf)
++    for h in range(H):
++        kvh = h // (H // KVH)
++        scores = qf[:, h] @ kf[:, kvh].transpose(-1, -2) * scale  # [B,S,S]
++        if causal:
++            mask = torch.tril(torch.ones(S, S, dtype=torch.bool, device=q.device))
++            scores = scores.masked_fill(~mask, float('-inf'))
++        p = torch.softmax(scores, dim=-1)
++        out[:, h] = p @ vf[:, kvh]
++    return out.to(q.dtype)
++
++def run_test(quick=True):
++    torch.manual_seed(0)
++    dev = 'cuda'
++    cfgs = [
++        (2, 16, 16, 512, False),
++        (2, 16, 16, 512, True),
++        (2, 16, 16, 1024, False),
++        (2, 16, 16, 1024, True),
++        (1, 16, 4, 512, False),
++        (1, 16, 4, 512, True),
++        (2, 16, 16, 4096, False),
++        (2, 16, 16, 4096, True),
++        (1, 16, 16, 333, False),
++        (1, 16, 16, 333, True),
++    ]
++    if quick:
++        cfgs = [(2, 16, 16, 512, False), (2, 16, 16, 512, True),
++                (1, 16, 4, 512, True), (1, 16, 16, 333, True)]
++    ok = True
++    for (B, H, KVH, S, causal) in cfgs:
++        q = torch.randn(B, H, S, 128, device=dev, dtype=torch.bfloat16)
++        k = torch.randn(B, KVH, S, 128, device=dev, dtype=torch.bfloat16)
++        v = torch.randn(B, KVH, S, 128, device=dev, dtype=torch.bfloat16)
++        out = mod.attention_forward(q, k, v, causal)
++        ref = ref_attn(q, k, v, causal)
++        err = (out.float() - ref.float()).abs().max().item()
++        thresh = 2 * 2 ** -8 + 1e-3  # ~0.0088
++        status = "OK " if err < thresh else "FAIL"
++        if err >= thresh: ok = False
++        print(f"{status} B={B} H={H} KVH={KVH} S={S} causal={causal} maxerr={err:.6f} thr={thresh:.6f}")
++    return ok
++
++if __name__ == '__main__':
++    quick = '--full' not in sys.argv
++    if not run_test(quick):
++        sys.exit(1)
++    # quick timing
++    for (B, H, KVH, S, causal) in [(8, 16, 16, 1024, False), (8, 16, 16, 1024, True), (2, 16, 16, 4096, False)]:
++        q = torch.randn(B, H, S, 128, device=dev, dtype=torch.bfloat16)
++        k = torch.randn(B, KVH, S, 128, device=dev, dtype=torch.bfloat16)
++        v = torch.randn(B, KVH, S, 128, device=dev, dtype=torch.bfloat16)
++        for _ in range(3):
++            out = mod.attention_forward(q, k, v, causal)
++        torch.cuda.synchronize()
++        n = 10
++        t0 = time.time()
++        for _ in range(n):
++            out = mod.attention_forward(q, k, v, causal)
++        torch.cuda.synchronize()
++        ms = (time.time() - t0) / n * 1e3
++        flops = 4 * B * H * S * S * 128 / (2 if causal else 1)
++        print(f"B={B} H={H} S={S} causal={causal}: {ms:.3f} ms, {flops/ms/1e9:.1f} TFLOPS")
++    print("ALL PASS")
+diff --git a/probe.cu b/probe.cu
+new file mode 100644
+index 0000000..585296d
+--- /dev/null
++++ b/probe.cu
+@@ -0,0 +1,75 @@
++// Probe: verify ldmatrix fragment mappings for mma.m16n8k16 on sm_86.
++// Dumps per-lane registers after ldmatrix.x4 (plain and .trans) from a
++// row-major 32x32 bf16 shared matrix with value = row*64 + col.
++#include <cuda_bf16.h>
++#include <cstdio>
++#include <cstdint>
++
++__device__ __forceinline__ void ldmatrix_x4(uint32_t r[4], const void* smem_ptr, bool trans) {
++    uint32_t addr = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
++    if (trans)
++        asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0,%1,%2,%3}, [%4];\n"
++                     : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]) : "r"(addr));
++    else
++        asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
++                     : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]) : "r"(addr));
++}
++
++// Address formula candidates for a 16x16 bf16 tile at (tile_row, tile_col)
++// inside a row-major matrix with row_stride bytes.
++// We only test formula: row = (l%8) + 8*((l/8)&1), col8 = 16*((l/8)>>1)
++__global__ void probe_kernel(uint32_t* out_plain, uint32_t* out_trans, int row_stride_b) {
++    __shared__ __align__(16) __nv_bfloat16 M[32][32];
++    int tid = threadIdx.x;
++    for (int i = tid; i < 32 * 32; i += blockDim.x)
++        M[i / 32][i % 32] = __float2bfloat16((float)((i / 32) * 64 + (i % 32)));
++    __syncthreads();
++
++    int l = threadIdx.x % 32;
++    // 16x16 tile: rows 8..23, cols 8..23 (offset so base isn't 0)
++    const int TR = 8, TC = 8;
++    const char* base = reinterpret_cast<const char*>(&M[TR][TC]);
++    uint32_t addr_off = static_cast<uint32_t>(__cvta_generic_to_shared(base));
++    // lane's address for matrix l/8, row l%8
++    int row = (l % 8) + 8 * ((l / 8) & 1);
++    int col_bytes = 16 * ((l / 8) >> 1);
++    uint32_t addr = addr_off + (uint32_t)(row * row_stride_b + col_bytes);
++
++    uint32_t rp[4], rt[4];
++    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
++                 : "=r"(rp[0]), "=r"(rp[1]), "=r"(rp[2]), "=r"(rp[3]) : "r"(addr));
++    asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0,%1,%2,%3}, [%4];\n"
++                 : "=r"(rt[0]), "=r"(rt[1]), "=r"(rt[2]), "=r"(rt[3]) : "r"(addr));
++    for (int i = 0; i < 4; ++i) { out_plain[l * 4 + i] = rp[i]; out_trans[l * 4 + i] = rt[i]; }
++}
++
++int main() {
++    uint32_t* op; uint32_t* ot;
++    cudaMalloc(&op, 32 * 4 * 4); cudaMalloc(&ot, 32 * 4 * 4);
++    probe_kernel<<<1, 32>>>(op, ot, 32 * 2);
++    cudaDeviceSynchronize();
++    uint32_t hp[128], ht[128];
++    cudaMemcpy(hp, op, 32 * 4 * 4, cudaMemcpyDeviceToHost);
++    cudaMemcpy(ht, ot, 32 * 4 * 4, cudaMemcpyDeviceToHost);
++
++    auto show = [](uint32_t v) {
++        __nv_bfloat16 blo = __ushort_as_bfloat16((unsigned short)(v & 0xffff));
++        __nv_bfloat16 bhi = __ushort_as_bfloat16((unsigned short)(v >> 16));
++        float flo = __bfloat162float(blo), fhi = __bfloat162float(bhi);
++        printf(" (%d,%d)(%d,%d)", (int)flo / 64, (int)flo % 64, (int)fhi / 64, (int)fhi % 64);
++    };
++    printf("=== PLAIN (value=row*64+col, tile rows 8..23, cols 8..23) ===\n");
++    printf("lane | reg0      reg1      reg2      reg3\n");
++    for (int l = 0; l < 32; ++l) {
++        printf("%4d |", l);
++        for (int i = 0; i < 4; ++i) { show(hp[l * 4 + i]); }
++        printf("\n");
++    }
++    printf("=== TRANS ===\n");
++    for (int l = 0; l < 32; ++l) {
++        printf("%4d |", l);
++        for (int i = 0; i < 4; ++i) { show(ht[l * 4 + i]); }
++        printf("\n");
++    }
++    return 0;
++}
+diff --git a/probe2.cu b/probe2.cu
+new file mode 100644
+index 0000000..518435e
+--- /dev/null
++++ b/probe2.cu
+@@ -0,0 +1,122 @@
++// Probe 2: validate mma.m16n8k16 fragment construction for QK^T.
++// K tile 16x16 (n x k), value = n*16 + k (exact in bf16).
++// Compare mma(Q, K^T) vs reference for:
++//   (a) B fragment built from direct 4-byte shared reads
++//   (b) B fragment built from ldmatrix.x4.trans
++#include <cuda_bf16.h>
++#include <cstdio>
++#include <cstdint>
++
++__device__ __forceinline__ void mma_m16n8k16(
++    float d[4], const uint32_t a[4], const uint32_t b[2], const float c[4])
++{
++    asm volatile(
++        "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
++        "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%11,%12,%13};\n"
++        : "=f"(d[0]), "=f"(d[1]), "=f"(d[2]), "=f"(d[3])
++        : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]),
++          "r"(b[0]), "r"(b[1]),
++          "f"(c[0]), "f"(c[1]), "f"(c[2]), "f"(c[3]));
++}
++
++__device__ __forceinline__ void ldmatrix_x4_trans(uint32_t r[4], const void* smem_ptr) {
++    uint32_t addr = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
++    asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0,%1,%2,%3}, [%4];\n"
++                 : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]) : "r"(addr));
++}
++
++// K tile stored as [16][16] bf16 row-major (row = n, col = k), row_stride bytes.
++__global__ void probe2_kernel(const __nv_bfloat16* K, float* out_direct, float* out_ldm,
++                              int row_stride_b) {
++    __shared__ __align__(16) __nv_bfloat16 sK[16][16];
++    for (int i = threadIdx.x; i < 256; i += blockDim.x) sK[i / 16][i % 16] = K[i];
++    __syncthreads();
++
++    const int l = threadIdx.x % 32;
++    const int g = l / 4, t = l % 4;
++
++    // A fragment for a 16x16 Q tile: q[g][2t], q[g][2t+1], q[g+8][2t], q[g+8][2t+1],
++    // q[g][2t+8], q[g][2t+9], q[g+8][2t+8], q[g+8][2t+9]
++    // Use Q = identity-ish: q[n][k] = (n==k) ? 1 : 0 -> Q*K^T = K^T, i.e. S[n][c] = K[c][n]
++    uint32_t a[4];
++    {
++        __nv_bfloat16 ae[8];
++        for (int i = 0; i < 8; ++i) {
++            int row = (i < 4) ? (i < 2 ? g : g + 8) : (i < 6 ? g : g + 8);
++            int col = (i % 2) + (i < 4 ? 0 : 8) + 2 * t;
++            ae[i] = (row == col) ? __float2bfloat16(1.f) : __float2bfloat16(0.f);
++        }
++        a[0] = (uint32_t)(__bfloat16_as_ushort(ae[1])) << 16 | __bfloat16_as_ushort(ae[0]);
++        a[1] = (uint32_t)(__bfloat16_as_ushort(ae[3])) << 16 | __bfloat16_as_ushort(ae[2]);
++        a[2] = (uint32_t)(__bfloat16_as_ushort(ae[5])) << 16 | __bfloat16_as_ushort(ae[4]);
++        a[3] = (uint32_t)(__bfloat16_as_ushort(ae[7])) << 16 | __bfloat16_as_ushort(ae[6]);
++    }
++
++    // (a) B fragment via direct shared reads: reg0 = K[g][2t],K[g][2t+1]; reg1 = K[g][2t+8],K[g][2t+9]
++    uint32_t bd[2];
++    bd[0] = *reinterpret_cast<const uint32_t*>(&sK[g][2 * t]);
++    bd[1] = *reinterpret_cast<const uint32_t*>(&sK[g][2 * t + 8]);
++
++    float c[4] = {0, 0, 0, 0}, dd[4];
++    mma_m16n8k16(dd, a, bd, c);
++
++    // (b) B fragment via ldmatrix.x4.trans on the 16x16 tile (contiguous rows)
++    uint32_t rt[4];
++    ldmatrix_x4_trans(rt, &sK[0][0]);
++
++    // Expected: rt regs should be K^T fragments. For row.col mma, B fragment wants
++    // b0 = (K[g][2t], K[g][2t+1]), b1 = (K[g+8][2t], K[g+8][2t+1]).
++    // Hypothesis: ldmatrix.x4.trans yields per-lane regs where
++    //   r0 = (K[g][2t],   K[g][2t+1])   (= b0)
++    //   r1 = (K[g+8][2t], K[g+8][2t+1]) (= b1)
++    //   r2/r3 = same for k+8 half: (K[g][2t+8],K[g][2t+9]) etc.
++    float dl[4];
++    uint32_t bl[2] = {rt[0], rt[1]};
++    mma_m16n8k16(dl, a, bl, c);
++
++    for (int i = 0; i < 4; ++i) { out_direct[l * 4 + i] = dd[i]; out_ldm[l * 4 + i] = dl[i]; }
++}
++
++int main() {
++    __nv_bfloat16* Kd; float* od; float* ol;
++    cudaMalloc(&Kd, 256 * 2); cudaMalloc(&od, 128 * 4); cudaMalloc(&ol, 128 * 4);
++    __nv_bfloat16 Kh[256];
++    for (int n = 0; n < 16; ++n)
++        for (int k = 0; k < 16; ++k) Kh[n * 16 + k] = __float2bfloat16((float)(n * 16 + k));
++    cudaMemcpy(Kd, Kh, 256 * 2, cudaMemcpyHostToDevice);
++    probe2_kernel<<<1, 32>>>(Kd, od, ol, 32);
++    cudaDeviceSynchronize();
++    float hd[128], hl[128];
++    cudaMemcpy(hd, od, 128 * 4, cudaMemcpyDeviceToHost);
++    cudaMemcpy(hl, ol, 128 * 4, cudaMemcpyDeviceToHost);
++
++    // Reference S = K^T: S[n][c] = K[c][n] = c*16+n (with Q=identity)
++    auto check = [](const float* h, const char* name) {
++        int bad = 0; float maxerr = 0;
++        for (int l = 0; l < 32; ++l) {
++            int g = l / 4, t = l % 4;
++            float exp[4] = {
++                (float)(2 * t) * 16 + g, (float)(2 * t + 1) * 16 + g,
++                (float)(2 * t) * 16 + g + 8, (float)(2 * t + 1) * 16 + g + 8 };
++            for (int i = 0; i < 4; ++i) {
++                float e = exp[i];
++                float err = fabsf(h[l * 4 + i] - e);
++                if (err > maxerr) maxerr = err;
++                if (err > 0.01f) bad++;
++            }
++        }
++        printf("%s: bad=%d maxerr=%.4f\n", name, bad, maxerr);
++    };
++    check(hd, "direct-read B");
++    check(hl, "ldmatrix.trans B");
++    printf("--- sample (lane, i): direct / ldm / expected ---\n");
++    for (int l = 0; l < 32; l += 4) {
++        int g = l / 4, t = l % 4;
++        for (int i = 0; i < 4; ++i) {
++            float e = (i < 2 ? (float)(2 * t + (i & 1)) * 16 + g
++                             : (float)(2 * t + (i & 1)) * 16 + g + 8);
++            printf("lane %2d i%d: %8.1f / %8.1f / %8.1f\n", l, i, hd[l * 4 + i], hl[l * 4 + i], e);
++        }
++    }
++    return 0;
++}
+diff --git a/probe3.cu b/probe3.cu
+new file mode 100644
+index 0000000..f7ef165
+--- /dev/null
++++ b/probe3.cu
+@@ -0,0 +1,46 @@
++// Probe 3: dump ldmatrix.x4.trans fragment for a 16x16 bf16 tile.
++// Tile value = n*16 + k (row n, col k), exact in bf16. Row stride 32 bytes.
++#include <cuda_bf16.h>
++#include <cstdio>
++#include <cstdint>
++
++__global__ void probe3_kernel(const __nv_bfloat16* K, uint32_t* out) {
++    __shared__ __align__(16) __nv_bfloat16 sK[16][16];
++    for (int i = threadIdx.x; i < 256; i += blockDim.x) sK[i / 16][i % 16] = K[i];
++    __syncthreads();
++    const int l = threadIdx.x % 32;
++    const char* base = reinterpret_cast<const char*>(&sK[0][0]);
++    uint32_t addr_off = static_cast<uint32_t>(__cvta_generic_to_shared(base));
++    // Correct address: lane l supplies address of row (l/4)%8 of matrix l/8.
++    int m = l / 8, row = (l / 4) % 8;
++    uint32_t addr = addr_off + (uint32_t)((m * 8 + row) * 32);
++    uint32_t r[4];
++    asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0,%1,%2,%3}, [%4];\n"
++                 : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]) : "r"(addr));
++    for (int i = 0; i < 4; ++i) out[l * 4 + i] = r[i];
++}
++
++int main() {
++    __nv_bfloat16* Kd; uint32_t* od;
++    cudaMalloc(&Kd, 256 * 2); cudaMalloc(&od, 128 * 4);
++    __nv_bfloat16 Kh[256];
++    for (int n = 0; n < 16; ++n)
++        for (int k = 0; k < 16; ++k) Kh[n * 16 + k] = __float2bfloat16((float)(n * 16 + k));
++    cudaMemcpy(Kd, Kh, 256 * 2, cudaMemcpyHostToDevice);
++    probe3_kernel<<<1, 32>>>(Kd, od);
++    cudaDeviceSynchronize();
++    uint32_t h[128];
++    cudaMemcpy(h, od, 128 * 4, cudaMemcpyDeviceToHost);
++    auto show = [](uint32_t v) {
++        __nv_bfloat16 blo = __ushort_as_bfloat16((unsigned short)(v & 0xffff));
++        __nv_bfloat16 bhi = __ushort_as_bfloat16((unsigned short)(v >> 16));
++        int flo = (int)__bfloat162float(blo), fhi = (int)__bfloat162float(bhi);
++        printf("(%d,%d)(%d,%d)", flo / 16, flo % 16, fhi / 16, fhi % 16);
++    };
++    for (int l = 0; l < 32; ++l) {
++        printf("lane %2d: ", l);
++        for (int i = 0; i < 4; ++i) show(h[l * 4 + i]);
++        printf("\n");
++    }
++    return 0;
++}
+diff --git a/probe4.cu b/probe4.cu
+new file mode 100644
+index 0000000..e807ffc
+--- /dev/null
++++ b/probe4.cu
+@@ -0,0 +1,55 @@
++// Probe 4: ldmatrix.x4 plain and trans, correct addr formula row=l%8, matrix=l/8.
++// Tile: 16x16 bf16, value = row*16+col, row stride 32B.
++#include <cuda_bf16.h>
++#include <cstdio>
++#include <cstdint>
++
++__global__ void probe4_kernel(const __nv_bfloat16* K, uint32_t* op, uint32_t* ot) {
++    __shared__ __align__(16) __nv_bfloat16 sK[16][16];
++    for (int i = threadIdx.x; i < 256; i += blockDim.x) sK[i / 16][i % 16] = K[i];
++    __syncthreads();
++    const int l = threadIdx.x % 32;
++    const char* base = reinterpret_cast<const char*>(&sK[0][0]);
++    uint32_t addr_off = static_cast<uint32_t>(__cvta_generic_to_shared(base));
++    int m = l / 8, row = l % 8;
++    uint32_t addr = addr_off + (uint32_t)((m * 8 + row) * 32);
++    uint32_t rp[4], rt[4];
++    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
++                 : "=r"(rp[0]), "=r"(rp[1]), "=r"(rp[2]), "=r"(rp[3]) : "r"(addr));
++    asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0,%1,%2,%3}, [%4];\n"
++                 : "=r"(rt[0]), "=r"(rt[1]), "=r"(rt[2]), "=r"(rt[3]) : "r"(addr));
++    for (int i = 0; i < 4; ++i) { op[l * 4 + i] = rp[i]; ot[l * 4 + i] = rt[i]; }
++}
++
++int main() {
++    __nv_bfloat16* Kd; uint32_t* op; uint32_t* ot;
++    cudaMalloc(&Kd, 256 * 2); cudaMalloc(&op, 128 * 4); cudaMalloc(&ot, 128 * 4);
++    __nv_bfloat16 Kh[256];
++    for (int n = 0; n < 16; ++n)
++        for (int k = 0; k < 16; ++k) Kh[n * 16 + k] = __float2bfloat16((float)(n * 16 + k));
++    cudaMemcpy(Kd, Kh, 256 * 2, cudaMemcpyHostToDevice);
++    probe4_kernel<<<1, 32>>>(Kd, op, ot);
++    cudaDeviceSynchronize();
++    uint32_t hp[128], ht[128];
++    cudaMemcpy(hp, op, 128 * 4, cudaMemcpyDeviceToHost);
++    cudaMemcpy(ht, ot, 128 * 4, cudaMemcpyDeviceToHost);
++    auto show = [](uint32_t v) {
++        __nv_bfloat16 blo = __ushort_as_bfloat16((unsigned short)(v & 0xffff));
++        __nv_bfloat16 bhi = __ushort_as_bfloat16((unsigned short)(v >> 16));
++        int flo = (int)__bfloat162float(blo), fhi = (int)__bfloat162float(bhi);
++        printf("(%d,%d)(%d,%d)", flo / 16, flo % 16, fhi / 16, fhi % 16);
++    };
++    printf("=== PLAIN ===\n");
++    for (int l = 0; l < 32; ++l) {
++        printf("lane %2d: ", l);
++        for (int i = 0; i < 4; ++i) show(hp[l * 4 + i]);
++        printf("\n");
++    }
++    printf("=== TRANS ===\n");
++    for (int l = 0; l < 32; ++l) {
++        printf("lane %2d: ", l);
++        for (int i = 0; i < 4; ++i) show(ht[l * 4 + i]);
++        printf("\n");
++    }
++    return 0;
++}

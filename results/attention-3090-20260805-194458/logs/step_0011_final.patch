@@ -1,0 +1,24 @@
+diff --git a/attention.cu b/attention.cu
+index 42d6552..59d875e 100644
+--- a/attention.cu
++++ b/attention.cu
+@@ -72,7 +72,9 @@ __global__ void attention_fwd_kernel(
+ #pragma unroll
+             for (int j = 0; j < D_PER_LANE; ++j) {
+                 acc[r][j] = 0.f;
+-                q_reg[r][j] = __bfloat162float(p[j]);
++                // Fold softmax scale into Q so the inner loop needs no
++                // per-column multiply (scale = 2^-7 is exact).
++                q_reg[r][j] = __bfloat162float(p[j]) * scale;
+             }
+         } else {
+ #pragma unroll
+@@ -132,7 +134,7 @@ __global__ void attention_fwd_kernel(
+ #pragma unroll
+                 for (int j = 0; j < D_PER_LANE; ++j)
+                     partial += q_reg[r][j] * __bfloat162float(pk[j]);
+-                s[r] = warp_sum(partial) * scale;
++                s[r] = warp_sum(partial);
+             }
+ 
+             // Online softmax at column granularity (tile size 1). Causal:

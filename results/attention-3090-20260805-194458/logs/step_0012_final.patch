@@ -1,0 +1,13 @@
+diff --git a/attention.cu b/attention.cu
+index 42d6552..644fddc 100644
+--- a/attention.cu
++++ b/attention.cu
+@@ -17,7 +17,7 @@
+ 
+ namespace {
+ 
+-constexpr int BLOCK_M = 64;   // query rows per block
++constexpr int BLOCK_M = 128;  // query rows per block (K/V tile reused across more rows)
+ constexpr int BLOCK_N = 64;   // key/value rows per tile
+ constexpr int HEAD_DIM = 128;
+ constexpr int NUM_WARPS = 8;

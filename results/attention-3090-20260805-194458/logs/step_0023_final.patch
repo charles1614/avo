@@ -1,0 +1,293 @@
+diff --git a/attention.cu b/attention.cu
+index c079177..cbb8eac 100644
+--- a/attention.cu
++++ b/attention.cu
+@@ -32,12 +32,13 @@ __device__ __forceinline__ float warp_sum(float v) {
+     return v;
+ }
+ 
++template <bool CAUSAL>
+ __global__ void attention_fwd_kernel(
+     const __nv_bfloat16* __restrict__ q,
+     const __nv_bfloat16* __restrict__ k,
+     const __nv_bfloat16* __restrict__ v,
+     __nv_bfloat16* __restrict__ out,
+-    int seq_len, float scale, bool causal, int num_heads, int kv_heads)
++    int seq_len, float scale, int num_heads, int kv_heads)
+ {
+     const int m_tile = blockIdx.x;
+     const int bh = blockIdx.y;  // fused batch*head index
+diff --git a/probe.cu b/probe.cu
+new file mode 100644
+index 0000000..4a96ead
+--- /dev/null
++++ b/probe.cu
+@@ -0,0 +1,268 @@
++// Probe: verify mma.m16n8k16 bf16 fragment layouts and ldmatrix feeding.
++// Compile: nvcc -arch=sm_86 -o probe probe.cu
++#include <cstdio>
++#include <cuda_runtime.h>
++#include <cuda_bf16.h>
++#include <stdint.h>
++
++__device__ __forceinline__ uint32_t pack2(__nv_bfloat16 lo, __nv_bfloat16 hi) {
++    return (uint32_t)__bfloat16_as_ushort(lo) | ((uint32_t)__bfloat16_as_ushort(hi) << 16);
++}
++
++__device__ __forceinline__ void mma_bf16(float d[4], const uint32_t a[4], const uint32_t b[2], const float c[4]) {
++    asm volatile(
++        "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
++        "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%11,%12,%13};\n"
++        : "=f"(d[0]), "=f"(d[1]), "=f"(d[2]), "=f"(d[3])
++        : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]),
++          "r"(b[0]), "r"(b[1]),
++          "f"(c[0]), "f"(c[1]), "f"(c[2]), "f"(c[3]));
++}
++
++__device__ __forceinline__ void ldmatrix_x4(uint32_t r[4], const void* smem_ptr) {
++    uint32_t addr = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
++    asm volatile(
++        "ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
++        : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]) : "r"(addr));
++}
++__device__ __forceinline__ void ldmatrix_x2_trans(uint32_t r[2], const void* smem_ptr) {
++    uint32_t addr = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
++    asm volatile(
++        "ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16 {%0,%1}, [%2];\n"
++        : "=r"(r[0]), "=r"(r[1]) : "r"(addr));
++}
++__device__ __forceinline__ void ldmatrix_x2(uint32_t r[2], const void* smem_ptr) {
++    uint32_t addr = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
++    asm volatile(
++        "ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0,%1}, [%2];\n"
++        : "=r"(r[0]), "=r"(r[1]) : "r"(addr));
++}
++__device__ __forceinline__ void ldmatrix_x4_trans(uint32_t r[4], const void* smem_ptr) {
++    uint32_t addr = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
++    asm volatile(
++        "ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0,%1,%2,%3}, [%4];\n"
++        : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]) : "r"(addr));
++}
++
++// swizzle: 128-byte swizzle. row = n index, col = bf16 index within 128-col row.
++// physical byte offset within tile row = ((col*2) & ~0x70) | (((col*2)&0x70) ^ ((row&7)<<4))
++__device__ __forceinline__ size_t swz_off(int row, int col) {
++    int b = col * 2;               // byte offset within row (256 bytes for 128 bf16)
++    int half = (b >> 7) & 1;       // 128-byte half
++    int chunk = (b >> 4) & 7;      // 16-byte chunk within half
++    chunk ^= (row & 7);
++    return (size_t)(half << 7) | (chunk << 4) | (b & 15);
++}
++
++// Reference CPU computation
++__global__ void ref_mma(float* out, int* fails) {
++    // expected D[m][n] = sum_k A[m][k]*B[k][n], A[m][k]=m*16+k, B[k][n]=k*8+n
++    int lane = threadIdx.x;
++    int g = lane >> 2, t = lane & 3;
++    float d[4];
++    d[0] = d[1] = d[2] = d[3] = 0.f;
++    for (int k = 0; k < 16; ++k) {
++        float a0 = (g) * 16 + k;
++        float a1 = (g + 8) * 16 + k;
++        float b0 = k * 8 + (2 * t);
++        float b1 = k * 8 + (2 * t + 1);
++        // d0 = row g col 2t, d1 = row g col 2t+1, d2 = row g+8 col 2t, d3 = row g+8 col 2t+1
++        d[0] += a0 * b0; d[1] += a0 * b1; d[2] += a1 * b0; d[3] += a1 * b1;
++    }
++    out[0 * 32 + lane] = d[0]; out[1 * 32 + lane] = d[1];
++    out[2 * 32 + lane] = d[2]; out[3 * 32 + lane] = d[3];
++}
++
++// Test 1: mma with explicit fragments
++__global__ void test_mma_explicit(float* got, int* fails) {
++    int lane = threadIdx.x;
++    int g = lane >> 2, t = lane & 3;
++    uint32_t a[4], b[2];
++    // A[m][k] = m*16+k. lane holds (row g, cols 2t,2t+1), (row g+8, ...), k-halves 0 and 1
++    __nv_bfloat16 a00 = __float2bfloat16((float)(g * 16 + 2 * t));
++    __nv_bfloat16 a01 = __float2bfloat16((float)(g * 16 + 2 * t + 1));
++    __nv_bfloat16 a10 = __float2bfloat16((float)((g + 8) * 16 + 2 * t));
++    __nv_bfloat16 a11 = __float2bfloat16((float)((g + 8) * 16 + 2 * t + 1));
++    __nv_bfloat16 a20 = __float2bfloat16((float)(g * 16 + 2 * t + 8));
++    __nv_bfloat16 a21 = __float2bfloat16((float)(g * 16 + 2 * t + 9));
++    __nv_bfloat16 a30 = __float2bfloat16((float)((g + 8) * 16 + 2 * t + 8));
++    __nv_bfloat16 a31 = __float2bfloat16((float)((g + 8) * 16 + 2 * t + 9));
++    a[0] = pack2(a00, a01);  // row g, k cols 2t,2t+1
++    a[1] = pack2(a10, a11);  // row g+8, k cols 2t,2t+1
++    a[2] = pack2(a20, a21);  // row g, k cols 2t+8,2t+9
++    a[3] = pack2(a30, a31);  // row g+8, k cols 2t+8,2t+9
++    // B[k][n] = k*8+n. lane holds (k=2t,2t+1 col g), (k=2t+8,2t+9 col g)
++    __nv_bfloat16 b00 = __float2bfloat16((float)((2 * t) * 8 + g));
++    __nv_bfloat16 b01 = __float2bfloat16((float)((2 * t + 1) * 8 + g));
++    __nv_bfloat16 b10 = __float2bfloat16((float)((2 * t + 8) * 8 + g));
++    __nv_bfloat16 b11 = __float2bfloat16((float)((2 * t + 9) * 8 + g));
++    b[0] = pack2(b00, b01);
++    b[1] = pack2(b10, b11);
++    float c[4] = {0, 0, 0, 0}, d[4];
++    mma_bf16(d, a, b, c);
++    got[0 * 32 + lane] = d[0]; got[1 * 32 + lane] = d[1];
++    got[2 * 32 + lane] = d[2]; got[3 * 32 + lane] = d[3];
++}
++
++// Test 2: ldmatrix.x4 (non-transposed) -> A fragment, quadrant order:
++//   matrix 0: rows 0-7, cols 0-7 (lanes 0-7)
++//   matrix 1: rows 8-15, cols 0-7 (lanes 8-15)
++//   matrix 2: rows 0-7, cols 8-15 (lanes 16-23)
++//   matrix 3: rows 8-15, cols 8-15 (lanes 24-31)
++__global__ void test_ldsm_x4(float* got, int* fails) {
++    __shared__ __align__(16) __nv_bfloat16 tile[16][128 + 8];  // row-major, cols beyond 16 unused
++    int lane = threadIdx.x;
++    for (int i = lane; i < 16 * 16; i += 32) {
++        int r = i / 16, c = i % 16;
++        tile[r][c] = __float2bfloat16((float)(r * 16 + c));
++    }
++    __syncthreads();
++    int g = lane >> 2, t = lane & 3;
++    int row = (lane % 8) + 8 * ((lane / 8) & 1);
++    int col = 8 * ((lane / 8) >> 1);
++    uint32_t r[4];
++    ldmatrix_x4(r, &tile[row][col]);
++    // Expect r0 = A[row g][2t..2t+1], r1 = A[g+8][...], r2 = A[g][2t+8..], r3 = A[g+8][2t+8..]
++    float exp[4] = {
++        (float)(g * 16 + 2 * t), (float)((g + 8) * 16 + 2 * t),
++        (float)(g * 16 + 2 * t + 8), (float)((g + 8) * 16 + 2 * t + 8)};
++    uint32_t* rr = r;
++    for (int i = 0; i < 4; ++i) {
++        float v0 = __bfloat162float(*reinterpret_cast<__nv_bfloat16*>(&rr[i]));
++        float v1 = __bfloat162float(*(reinterpret_cast<__nv_bfloat16*>(&rr[i]) + 1));
++        got[(2 * i + 0) * 32 + lane] = v0;
++        got[(2 * i + 1) * 32 + lane] = v1;
++        if (fabsf(v0 - exp[i]) > 0.5f || fabsf(v1 - (exp[i] + 1)) > 0.5f)
++            atomicAdd(fails, 1);
++    }
++}
++
++// Test 3: ldmatrix.x2.trans -> B fragment for K^T. sK[n][d] row-major 16x8, values n*8+d.
++//   lanes 0-7: addr = &sK[l%8][0]; lanes 8-15: addr = &sK[l%8][8]
++//   expect r0 = {K[2t][g], K[2t+1][g]}, r1 = {K[2t+8][g], K[2t+9][g]}
++__global__ void test_ldsm_x2_trans(float* got, int* fails) {
++    __shared__ __align__(16) __nv_bfloat16 sk[16][8];
++    int lane = threadIdx.x;
++    for (int i = lane; i < 16 * 8; i += 32) {
++        int r = i / 8, c = i % 8;
++        sk[r][c] = __float2bfloat16((float)(r * 8 + c));
++    }
++    __syncthreads();
++    int g = lane >> 2, t = lane & 3;
++    uint32_t r[2];
++    if (lane < 16)
++        ldmatrix_x2_trans(r, &sk[lane % 8 + 8 * (lane / 8)][0]);
++    else { r[0] = r[1] = 0; }
++    // expect r0 = {sk[2t][g], sk[2t+1][g]}, r1 = {sk[2t+8][g], sk[2t+9][g]}
++    float exp0 = (float)(2 * t * 8 + g);
++    float exp1 = (float)((2 * t + 1) * 8 + g);
++    float exp2 = (float)((2 * t + 8) * 8 + g);
++    float exp3 = (float)((2 * t + 9) * 8 + g);
++    if (lane < 16) {
++        float v0 = __bfloat162float(*reinterpret_cast<__nv_bfloat16*>(&r[0]));
++        float v1 = __bfloat162float(*(reinterpret_cast<__nv_bfloat16*>(&r[0]) + 1));
++        float v2 = __bfloat162float(*reinterpret_cast<__nv_bfloat16*>(&r[1]));
++        float v3 = __bfloat162float(*(reinterpret_cast<__nv_bfloat16*>(&r[1]) + 1));
++        got[0 * 32 + lane] = v0; got[1 * 32 + lane] = v1;
++        got[2 * 32 + lane] = v2; got[3 * 32 + lane] = v3;
++        if (fabsf(v0 - exp0) > 0.5f || fabsf(v1 - exp1) > 0.5f ||
++            fabsf(v2 - exp2) > 0.5f || fabsf(v3 - exp3) > 0.5f)
++            atomicAdd(fails, 1);
++    }
++}
++
++// Test 4: full pipeline: ldmatrix.x4 (A) + ldmatrix.x2.trans (B, all 32 lanes) -> mma
++// Shared: Q 16x16 row-major, K^T as sk[16][8] (k rows x n cols), value k*8+n.
++__global__ void test_full(float* got, int* fails) {
++    __shared__ __align__(16) __nv_bfloat16 sq[16][128 + 8];
++    __shared__ __align__(16) __nv_bfloat16 sk[16][8];
++    int lane = threadIdx.x;
++    for (int i = lane; i < 16 * 16; i += 32) {
++        int r = i / 16, c = i % 16;
++        sq[r][c] = __float2bfloat16((float)(r * 16 + c));
++    }
++    for (int i = lane; i < 16 * 8; i += 32) {
++        int r = i / 8, c = i % 8;
++        sk[r][c] = __float2bfloat16((float)(r * 8 + c));
++    }
++    __syncthreads();
++    int g = lane >> 2, t = lane & 3;
++    int row = (lane % 8) + 8 * ((lane / 8) & 1);
++    int col = 8 * ((lane / 8) >> 1);
++    uint32_t a[4];
++    ldmatrix_x4(a, &sq[row][col]);
++    uint32_t b[2];
++    // .x2.trans: lanes 0-7 -> mat0 (k rows 0-7), lanes 8-15 -> mat1 (k rows 8-15).
++    // Lanes 16-31 duplicate addresses of 0-15 (per PTX note for x1/x2).
++    int krow = lane % 8 + 8 * ((lane / 8) & 1);
++    ldmatrix_x2_trans(b, &sk[krow][0]);
++    float c[4] = {0, 0, 0, 0}, d[4];
++    mma_bf16(d, a, b, c);
++    got[0 * 32 + lane] = d[0]; got[1 * 32 + lane] = d[1];
++    got[2 * 32 + lane] = d[2]; got[3 * 32 + lane] = d[3];
++}
++
++int main() {
++    float *ref, *got, *dgot;
++    int *dfails, fails = 0;
++    cudaMalloc(&ref, 4 * 32 * 4); cudaMalloc(&got, 8 * 32 * 4); cudaMalloc(&dgot, 8 * 32 * 4);
++    cudaMalloc(&dfails, 4);
++    cudaMemcpy(dfails, &fails, 4, cudaMemcpyHostToDevice);
++
++    ref_mma<<<1, 32>>>(ref, dfails);
++    test_mma_explicit<<<1, 32>>>(got, dfails);
++    cudaMemcpy(&fails, dfails, 4, cudaMemcpyDeviceToHost);
++    float r[4 * 32], g[8 * 32];
++    cudaMemcpy(r, ref, 4 * 32 * 4, cudaMemcpyDeviceToHost);
++    cudaMemcpy(g, got, 4 * 32 * 4, cudaMemcpyDeviceToHost);
++    int bad = 0;
++    for (int i = 0; i < 4 * 32; ++i)
++        if (fabsf(r[i] - g[i]) > 1.f) { bad++; if (bad < 5) printf("mma explicit: lane %d idx %d ref %.1f got %.1f\n", i % 32, i / 32, r[i], g[i]); }
++    printf("Test1 (explicit mma): %s\n", bad == 0 ? "PASS" : "FAIL");
++
++    // ldmatrix x4
++    cudaMemset(dfails, 0, 4);
++    test_ldsm_x4<<<1, 32>>>(dgot, dfails);
++    cudaMemcpy(&fails, dfails, 4, cudaMemcpyDeviceToHost);
++    cudaMemcpy(g, dgot, 8 * 32 * 4, cudaMemcpyDeviceToHost);
++    printf("Test2 (ldsm.x4 -> A frag): %s\n", fails == 0 ? "PASS" : "FAIL");
++    if (fails) {
++        for (int lane = 0; lane < 32; ++lane) {
++            int g2 = lane >> 2, t2 = lane & 3;
++            printf("  lane %d (g%d t%d):", lane, g2, t2);
++            for (int i = 0; i < 8; ++i) printf(" %.0f", g[i * 32 + lane]);
++            printf("  expect: %.0f %.0f %.0f %.0f %.0f %.0f %.0f %.0f\n",
++                   (float)(g2 * 16 + 2 * t2), (float)(g2 * 16 + 2 * t2 + 1),
++                   (float)((g2 + 8) * 16 + 2 * t2), (float)((g2 + 8) * 16 + 2 * t2 + 1),
++                   (float)(g2 * 16 + 2 * t2 + 8), (float)(g2 * 16 + 2 * t2 + 9),
++                   (float)((g2 + 8) * 16 + 2 * t2 + 8), (float)((g2 + 8) * 16 + 2 * t2 + 9));
++        }
++    }
++
++    // ldmatrix x2 trans
++    cudaMemset(dfails, 0, 4);
++    test_ldsm_x2_trans<<<1, 32>>>(dgot, dfails);
++    cudaMemcpy(&fails, dfails, 4, cudaMemcpyDeviceToHost);
++    cudaMemcpy(g, dgot, 8 * 32 * 4, cudaMemcpyDeviceToHost);
++    printf("Test3 (ldsm.x2.trans -> B frag): %s\n", fails == 0 ? "PASS" : "FAIL");
++    if (fails) {
++        for (int lane = 0; lane < 16; ++lane) {
++            int g2 = lane >> 2, t2 = lane & 3;
++            printf("  lane %d (g%d t%d):", lane, g2, t2);
++            for (int i = 0; i < 4; ++i) printf(" %.0f", g[i * 32 + lane]);
++            printf("  expect: %.0f %.0f %.0f %.0f\n",
++                   (float)(2 * t2 * 8 + g2), (float)((2 * t2 + 1) * 8 + g2),
++                   (float)((2 * t2 + 8) * 8 + g2), (float)((2 * t2 + 9) * 8 + g2));
++        }
++    }
++
++    // full
++    cudaMemset(dfails, 0, 4);
++    test_full<<<1, 32>>>(dgot, dfails);
++    cudaMemcpy(g, dgot, 4 * 32 * 4, cudaMemcpyDeviceToHost);
++    bad = 0;
++    for (int i = 0; i < 4 * 32; ++i)
++        if (fabsf(r[i] - g[i]) > 1.f) { bad++; if (bad < 5) printf("full: lane %d idx %d ref %.1f got %.1f\n", i % 32, i / 32, r[i], g[i]); }
++    printf("Test4 (ldsm x4 + x2trans + mma): %s\n", bad == 0 ? "PASS" : "FAIL");
++    return 0;
++}
