@@ -51,13 +51,14 @@ flowchart LR
 
 ```bash
 git clone <this-repo> && cd avo
-python3 -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev,report]"          # or: pip install -r requirements-lock.txt
-pytest                                   # 68 tests — no API key, network, or GPU
+uv sync --extra dev --extra report       # exact env from uv.lock
+uv run pytest                            # 70 tests — no API key, network, or GPU
+# without uv: python3 -m venv .venv && source .venv/bin/activate
+#             pip install -r requirements-lock.txt && pip install -e . --no-deps
 
 # fetch the knowledge base (FA2/FA3 + CUTLASS at pinned commits, NVIDIA docs)
-python scripts/fetch_kb.py --from-manifest
-python scripts/fetch_nvidia_docs.py
+uv run python scripts/fetch_kb.py --from-manifest
+uv run python scripts/fetch_nvidia_docs.py
 ```
 
 **Toy evolution (local CPU, ~$0.3 of LLM tokens):**
@@ -69,18 +70,28 @@ avo run --config configs/sort_py.yaml --confirm-spend
 avo dashboard --watch 30 --open          # live wandb-style dashboard
 ```
 
-**Kernel evolution (remote NVIDIA GPU — works from a clean GPU host):**
+**Kernel evolution.** Two topologies, chosen per config by `runner.kind`:
+
+*Directly on the GPU machine* (`kind: local` — e.g. clone this repo on the
+H100 box). The harness needs a torch-enabled python; point `runner.python`
+at it, or reuse the same env:
 
 ```bash
-# one-time host provisioning: scratch dir, venv, torch wheel matched to the
-# host's CUDA toolkit, ninja, numpy (idempotent; needs only ssh + python3-venv)
+uv sync --extra dev && uv pip install torch==2.13.0 --index-url \
+  https://download.pytorch.org/whl/cu130 ninja numpy   # match your CUDA toolkit
+avo eval-once  --config configs/attention_h100.yaml            # seed compiles + scores (no LLM)
+avo baselines  --config configs/attention_h100.yaml            # SDPA / FA3 lines
+avo run        --config configs/attention_h100.yaml --confirm-spend
+```
+
+*Framework on your laptop, GPU over ssh* (`kind: ssh` — how the 3090 Ti runs
+here). One-time host provisioning (idempotent, pins the torch version):
+
+```bash
 bash scripts/provision_remote.sh <ssh-host>
 bash scripts/setup_remote.sh <ssh-host> \
   'export PATH=/usr/local/cuda/bin:$PATH && source ~/avo_scratch/venv/bin/activate'
-
-avo eval-once  --config configs/attention_3090.yaml            # score the seed (no LLM)
-avo baselines  --config configs/attention_3090.yaml            # SDPA / flash-attn lines
-avo run        --config configs/attention_3090.yaml --confirm-spend
+avo run --config configs/attention_3090.yaml --confirm-spend
 ```
 
 ## Commands

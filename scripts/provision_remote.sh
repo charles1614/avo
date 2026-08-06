@@ -12,6 +12,10 @@ set -euo pipefail
 
 HOST=${1:?usage: provision_remote.sh <ssh-host> [torch-wheel-tag]}
 TAG=${2:-auto}
+# Pinned: hosts provisioned months apart must produce comparable numbers.
+# Override with TORCH_VERSION=x.y.z when deliberately upgrading (re-provision
+# every host and re-run baselines when you do).
+TORCH_VERSION=${TORCH_VERSION:-2.13.0}
 
 run() { ssh -o BatchMode=yes -o ConnectTimeout=15 "$HOST" "$1"; }
 
@@ -42,8 +46,8 @@ run 'mkdir -p ~/avo_scratch/build_cache'
 run 'test -x ~/avo_scratch/venv/bin/python || python3 -m venv ~/avo_scratch/venv'
 run '~/avo_scratch/venv/bin/pip install --quiet --upgrade pip'
 
-echo "== torch ($TAG) + ninja + numpy (skipped if already satisfied) =="
-run "~/avo_scratch/venv/bin/pip install --quiet torch --index-url https://download.pytorch.org/whl/$TAG"
+echo "== torch $TORCH_VERSION ($TAG) + ninja + numpy (skipped if already satisfied) =="
+run "~/avo_scratch/venv/bin/pip install --quiet torch==$TORCH_VERSION --index-url https://download.pytorch.org/whl/$TAG"
 run '~/avo_scratch/venv/bin/pip install --quiet ninja numpy'
 
 echo "== verify =="
