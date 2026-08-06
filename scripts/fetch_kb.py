@@ -28,6 +28,13 @@ REPOS = {
         # attention-kernel author actually reads
         "keep": ["include/cute", "include/cutlass/arch"],
     },
+    "kernelbench": {
+        "repo": "https://github.com/ScalingIntelligence/KernelBench.git",
+        # problem definitions only (reference Model + get_inputs per file);
+        # consumed by scripts/run_kernelbench.py, evaluated by OUR harness
+        "keep": ["KernelBench/level1", "KernelBench/level2",
+                 "KernelBench/level3", "LICENSE.md"],
+    },
 }
 
 

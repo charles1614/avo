@@ -100,6 +100,30 @@ Evals then rsync the workspace to the host and run there; the agent gets a
 `gpu_shell` tool for remote probes (locally, plain `shell` reaches the GPU).
 </details>
 
+## KernelBench campaigns
+
+[KernelBench](https://github.com/ScalingIntelligence/KernelBench) (ICML'25,
+270 problems) runs inside AVO as an unattended campaign: one bounded evolution
+per problem, score = speedup vs PyTorch eager (comparable to `fast_p`), but
+evaluated under AVO's discipline — the authoritative reference is embedded in
+the (cache-keyed) eval params so the agent can't touch it, correctness uses
+multiple content-hash-seeded trials, and memory-frugal chunked comparison.
+
+```bash
+python scripts/fetch_kb.py --only kernelbench       # problems, manifest-pinned
+python scripts/run_kernelbench.py --config configs/kernelbench_h100.yaml \
+    --problems level1 --dry                          # seed-eval every problem, no LLM
+nohup python scripts/run_kernelbench.py --config configs/kernelbench_h100.yaml \
+    --problems level1,level2 --confirm-spend > kb_campaign.log 2>&1 &
+python scripts/run_kernelbench.py --config ... --report-only   # fast_p table
+```
+
+Free-running by design: finished problems are skipped on relaunch, per-problem
+budgets bound each evolution, `campaign.max_total_usd` bounds the sweep, and
+`results/kernelbench_report.md` aggregates fast_1/1.5/2. Note: some v0.1
+problems allocate >18 GiB — sized for 80 GB cards; they fail gracefully
+(structured OOM, score 0) on smaller GPUs.
+
 ## Commands
 
 | command | what it does | LLM cost |

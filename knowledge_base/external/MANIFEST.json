@@ -49,5 +49,17 @@
   "url": "https://docs.nvidia.com/cuda/archive/12.6.3/ampere-tuning-guide/",
   "version": null,
   "fetched_at": "2026-08-05T13:45:31.996372+00:00"
+ },
+ "kernelbench": {
+  "type": "git",
+  "repo": "https://github.com/ScalingIntelligence/KernelBench.git",
+  "commit": "423217d9fda91e0c2d67e4a43bf62f96f6d104f1",
+  "kept": [
+   "KernelBench/level1",
+   "KernelBench/level2",
+   "KernelBench/level3",
+   "LICENSE.md"
+  ],
+  "fetched_at": "2026-08-06T01:52:20.015987+00:00"
  }
 }

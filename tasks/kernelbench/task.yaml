@@ -1,0 +1,25 @@
+name: kernelbench
+seed_dir: seed_template
+harness_dir: harness
+score_entry: score.py
+brief: |
+  Optimize one KernelBench problem: make the PyTorch computation in
+  `problem.py` run faster on this GPU while staying numerically correct.
+
+  `problem.py` defines the reference: `Model` (the computation), `get_inputs()`
+  (the fixed benchmark shapes), `get_init_inputs()`. Your deliverable is
+  `model_new.py` defining `ModelNew` — same constructor signature and forward
+  semantics as `Model`, any implementation you like: custom CUDA via
+  torch.utils.cpp_extension (load_inline), Triton, torch.compile, algebraic
+  restructuring, fusion. You may add .cu/.py files next to it.
+
+  Scoring: correctness first — your ModelNew output is compared against the
+  authoritative reference (a pristine copy; editing problem.py in your
+  workspace cannot change the reference) on multiple randomized trials; any
+  mismatch scores 0. Then both are timed with CUDA events (median of repeats)
+  and score = reference_time / your_time — the speedup over PyTorch eager.
+  The seed wraps the reference itself, so it scores exactly ~1.0: any real
+  optimization beats it.
+
+  The knowledge base has CUDA/PTX documentation, arch tuning guides, and the
+  FlashAttention/CUTLASS sources for technique reference.

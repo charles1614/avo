@@ -1,0 +1,45 @@
+# KernelBench campaign on the H100 (framework runs on the box).
+# Launch: python scripts/run_kernelbench.py --config configs/kernelbench_h100.yaml \
+#           --problems level1 --confirm-spend
+# Per-problem budgets below; campaign-wide cap under `campaign:`.
+run_name: kb           # overridden per problem (kb-<problem-slug>)
+task: tasks/kernelbench
+llm:
+  provider: openai_compat
+  model: deepseek-v4-flash
+  base_url: https://api.deepseek.com
+  api_key_env: DEEPSEEK_API_KEY
+  max_tokens: 16384
+  extra_body:
+    thinking:
+      type: enabled
+    reasoning_effort: high
+  price_input_per_mtok: 0.14
+  price_output_per_mtok: 0.28
+runner:
+  kind: local
+  python: .venv/bin/python
+  eval_timeout_s: 1200
+gpu_sheet: |
+  NVIDIA H100 (GH100, Hopper, sm_90a): 132 SMs, 228 KB shared/L1 per SM, TMA,
+  wgmma, setmaxnreg (compile sm_90a to expose them). Peak BF16 tensor
+  ~990 TFLOPS, 3.35 TB/s HBM3.
+task_params:
+  num_correct_trials: 3
+  warmup: 5
+  repeats: 20
+  tolerance: 0.01        # stock KernelBench tolerance, but multi-trial
+budgets:               # per problem
+  max_versions: 3
+  max_steps: 6
+  max_wall_clock_s: 7200
+  max_turns_per_step: 40
+  max_evals_per_step: 8
+  max_usd: 1.5
+  max_total_tokens: 12000000
+supervisor:
+  stagnation_steps: 2
+  min_rel_improvement: 0.02
+  window: 3
+campaign:
+  max_total_usd: 100.0   # hard stop across all problems
