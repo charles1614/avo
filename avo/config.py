@@ -18,6 +18,9 @@ class LLMConfig(BaseModel):
     api_key_env: str | None = None
     max_tokens: int = 8192
     temperature: float | None = None  # None = provider default
+    # openai_compat only: stream completions and assemble locally. Default on —
+    # gateways buffer non-streamed responses and 504 on long reasoning output.
+    stream: bool = True
     # Provider-specific request fields passed through verbatim, e.g. DeepSeek
     # thinking: {"thinking": {"type": "enabled"}, "reasoning_effort": "high"}
     # or Anthropic {"thinking": {"type": "enabled", "budget_tokens": 8000}}.

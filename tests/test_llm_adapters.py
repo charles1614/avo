@@ -85,6 +85,41 @@ def test_openai_parse_ok():
     assert tu.input == {"path": "a.py"} and tu.parse_error is None
 
 
+def test_stream_assembly_matches_nonstreaming_shape():
+    from avo.llm.openai_compat import assemble_stream
+    chunks = [
+        {"choices": [{"delta": {"content": "editing "}, "finish_reason": None}]},
+        {"choices": [{"delta": {"content": "now"}, "finish_reason": None}]},
+        {"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "id": "c1", "function": {"name": "edit", "arguments": '{"pa'}}]},
+            "finish_reason": None}]},
+        {"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "function": {"arguments": 'th": "a.py"}'}}]},
+            "finish_reason": None}]},
+        {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
+        {"choices": [], "usage": {"prompt_tokens": 12, "completion_tokens": 7}},
+    ]
+    turn = parse_openai_choice(assemble_stream(chunks))
+    assert turn.message.text() == "editing now"
+    tu = turn.message.tool_uses()[0]
+    assert tu.id == "c1" and tu.input == {"path": "a.py"} and tu.parse_error is None
+    assert turn.stop_reason == "tool_use"
+    assert turn.usage.input_tokens == 12 and turn.usage.output_tokens == 7
+
+
+def test_stream_assembly_multiple_tool_calls():
+    from avo.llm.openai_compat import assemble_stream
+    chunks = [
+        {"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "id": "a", "function": {"name": "read_file", "arguments": "{}"}},
+            {"index": 1, "id": "b", "function": {"name": "list_dir", "arguments": "{}"}},
+        ]}, "finish_reason": None}]},
+        {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
+    ]
+    turn = parse_openai_choice(assemble_stream(chunks))
+    assert [t.name for t in turn.message.tool_uses()] == ["read_file", "list_dir"]
+
+
 def test_openai_parse_malformed_arguments():
     turn = parse_openai_choice({
         "choices": [{"message": {"content": None, "tool_calls": [

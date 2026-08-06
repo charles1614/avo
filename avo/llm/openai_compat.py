@@ -54,6 +54,45 @@ def to_openai_tools(tools: list[ToolSpec]) -> list[dict]:
                           "parameters": t.input_schema}} for t in tools]
 
 
+def assemble_stream(chunks: list[dict]) -> dict:
+    """Fold streaming chunk dicts into one non-streaming-shaped response so
+    parse_openai_choice handles both paths identically. Tool-call deltas are
+    keyed by index; the final usage-only chunk (stream_options include_usage)
+    carries token counts."""
+    content_parts: list[str] = []
+    tool_calls: dict[int, dict] = {}
+    finish_reason = None
+    usage = None
+    for chunk in chunks:
+        if chunk.get("usage"):
+            usage = chunk["usage"]
+        choices = chunk.get("choices") or []
+        if not choices:
+            continue
+        ch = choices[0]
+        finish_reason = ch.get("finish_reason") or finish_reason
+        delta = ch.get("delta") or {}
+        if delta.get("content"):
+            content_parts.append(delta["content"])
+        for tc in delta.get("tool_calls") or []:
+            slot = tool_calls.setdefault(
+                tc.get("index", 0),
+                {"id": "", "type": "function",
+                 "function": {"name": "", "arguments": ""}})
+            if tc.get("id"):
+                slot["id"] = tc["id"]
+            fn = tc.get("function") or {}
+            if fn.get("name"):
+                slot["function"]["name"] += fn["name"]
+            if fn.get("arguments"):
+                slot["function"]["arguments"] += fn["arguments"]
+    message: dict = {"content": "".join(content_parts) or None}
+    if tool_calls:
+        message["tool_calls"] = [tool_calls[i] for i in sorted(tool_calls)]
+    return {"choices": [{"message": message, "finish_reason": finish_reason}],
+            "usage": usage}
+
+
 def parse_openai_choice(resp: dict) -> AssistantTurn:
     choice = resp["choices"][0]
     msg = choice.get("message", {})
@@ -104,7 +143,26 @@ class OpenAICompatClient(LLMClient):
             kwargs["temperature"] = self.cfg.temperature
         if self.cfg.extra_body:
             kwargs["extra_body"] = self.cfg.extra_body
-        resp = self._client.chat.completions.create(**kwargs)
-        turn = parse_openai_choice(resp.model_dump())
+        if self.cfg.stream:
+            resp_dict = self._create_streamed(kwargs)
+        else:
+            resp_dict = self._client.chat.completions.create(**kwargs).model_dump()
+        turn = parse_openai_choice(resp_dict)
+        if turn.usage.total_tokens == 0:  # server omitted usage: estimate
+            turn.usage = Usage(
+                input_tokens=sum(len(str(m)) for m in kwargs["messages"]) // 4,
+                output_tokens=len(str(resp_dict["choices"][0]["message"])) // 4)
         self.usage.add(turn.usage)
         return turn
+
+    def _create_streamed(self, kwargs: dict) -> dict:
+        """Stream and assemble locally: gateways buffer non-streamed responses
+        and time out (504) on long reasoning output."""
+        import openai
+        try:
+            stream = self._client.chat.completions.create(
+                **kwargs, stream=True,
+                stream_options={"include_usage": True})
+        except openai.BadRequestError:  # server rejects stream_options
+            stream = self._client.chat.completions.create(**kwargs, stream=True)
+        return assemble_stream([c.model_dump() for c in stream])

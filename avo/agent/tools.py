@@ -75,8 +75,20 @@ class ToolRegistry:
     # -- specs ---------------------------------------------------------------
 
     def specs(self) -> list[ToolSpec]:
+        remote_gpu = self.ctx.runner is not None
+        shell_desc = (
+            "Run a shell command with the local workspace as cwd, on the "
+            "framework host. The GPU lives on the remote host — use gpu_shell "
+            "for GPU probes." if remote_gpu else
+            "Run a shell command with the workspace as cwd, on this machine "
+            "(which has the GPU). Fine for probes (nvidia-smi, nvcc, ncu); do "
+            "NOT build your own test/benchmark environment — only `evaluate` "
+            "uses the scoring environment, and ad-hoc results will not match.")
         s = [
-            _spec("read_file", "Read a file in the workspace. Returns numbered lines.",
+            _spec("read_file",
+                  "Read a file. Workspace-relative paths, plus knowledge-base "
+                  "paths as shown by kb_search (knowledge_base/...) are served "
+                  "read-only. Returns numbered lines.",
                   {"path": {"type": "string", "description": "workspace-relative path"},
                    "offset": {"type": "integer", "description": "1-based first line"},
                    "limit": {"type": "integer", "description": "max lines"}},
@@ -92,8 +104,7 @@ class ToolRegistry:
             _spec("list_dir", "List a workspace directory.",
                   {"path": {"type": "string", "description": "workspace-relative, '' for root"}},
                   []),
-            _spec("shell",
-                  "Run a shell command with the local workspace as cwd. No GPU here.",
+            _spec("shell", shell_desc,
                   {"command": {"type": "string"},
                    "timeout_s": {"type": "integer"}},
                   ["command"]),
@@ -150,7 +161,16 @@ class ToolRegistry:
 
     # -- file tools ----------------------------------------------------------
 
+    def _kb_root_names(self) -> set[str]:
+        return {d.name for d in self.ctx.kb.dirs}
+
     def _t_read_file(self, path: str, offset: int = 1, limit: int = 2000) -> ToolOutcome:
+        # kb_search shows knowledge-base paths that look like ordinary files;
+        # serve them read-only instead of failing and derailing the agent
+        first = path.split("/", 1)[0]
+        if first in self._kb_root_names():
+            return ToolOutcome(self.ctx.kb.read(path, start_line=offset,
+                                                end_line=offset + limit - 1))
         try:
             p = self._safe_path(path)
         except ValueError:
@@ -239,7 +259,11 @@ class ToolRegistry:
         return ToolOutcome(self.ctx.kb.search(query))
 
     def _t_kb_read(self, path: str, start_line: int | None = None,
-                   end_line: int | None = None) -> ToolOutcome:
+                   end_line: int | None = None, offset: int | None = None,
+                   limit: int | None = None) -> ToolOutcome:
+        if offset is not None:  # accept read_file-style pagination too
+            start_line = offset
+            end_line = offset + (limit or 2000) - 1
         return ToolOutcome(self.ctx.kb.read(path, start_line, end_line))
 
     # -- evaluate / submit -----------------------------------------------------

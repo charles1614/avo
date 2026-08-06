@@ -32,6 +32,9 @@ correct AND score >= {best_score:.4f} (the current best committed score).
 - Large files: never emit more than ~150 lines in one write_file/edit_file
   call — the arguments get truncated past the output-token limit and the
   whole call is lost. Write a skeleton, then extend with multiple edits.
+- `evaluate` is the ONLY environment that counts. Never build a parallel test
+  or benchmark setup with the system Python/torch — its results will not match
+  the scoring environment, and time spent there is wasted.
 - Workspace hygiene: delete scratch/probe/bench files before `submit` — the
   commit should contain only files the solution needs (stray .cu files are
   compiled into the module; stray files pollute the lineage).

@@ -84,6 +84,33 @@ def test_kb_tools(registry):
     assert "online softmax" in hits.content
     body = registry.dispatch("kb_read", {"path": "notes.md"})
     assert "use online softmax" in body.content
+    # read_file-style pagination accepted by kb_read
+    body2 = registry.dispatch("kb_read", {"path": "notes.md", "offset": 2, "limit": 1})
+    assert "online softmax" in body2.content and "# Notes" not in body2.content
+
+
+def test_read_file_serves_kb_paths(registry):
+    # kb_search shows paths prefixed with the kb dir name; read_file must
+    # serve them instead of erroring (this derailed a live H100 run)
+    out = registry.dispatch("read_file", {"path": "kb/notes.md"})
+    assert not out.is_error and "online softmax" in out.content
+    paged = registry.dispatch("read_file", {"path": "kb/notes.md",
+                                            "offset": 2, "limit": 1})
+    assert not paged.is_error and "# Notes" not in paged.content
+
+
+def test_shell_description_topology_aware(registry):
+    local_desc = next(s.description for s in registry.specs()
+                      if s.name == "shell")
+    assert "which has the GPU" in local_desc and "evaluate" in local_desc
+
+    from avo.config import RunnerConfig
+    from avo.eval.ssh_runner import SSHRunner
+    registry.ctx.runner = SSHRunner(RunnerConfig(kind="ssh", host="x"), "r")
+    remote_desc = next(s.description for s in registry.specs()
+                       if s.name == "shell")
+    assert "remote host" in remote_desc and "gpu_shell" in remote_desc
+    registry.ctx.runner = None
 
 
 def test_kb_search_spreads_hits_across_files(tmp_path):
