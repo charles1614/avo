@@ -59,6 +59,13 @@ def test_ssh_runner_resolves_tilde_scratch(monkeypatch):
     assert r._remote("work") == "/home/u/avo_scratch/run1/work"
 
 
+def test_resolve_python_paths():
+    from avo.eval.runner import resolve_python
+    assert resolve_python("python3") == "python3"  # PATH lookup untouched
+    resolved = resolve_python(".venv/bin/python")
+    assert resolved.startswith("/") and resolved.endswith("/.venv/bin/python")
+
+
 def test_cache_round_trip(tmp_path):
     cache = EvalCache(tmp_path / "cache")
     r = ScoreResult(correct=True, score=12.5, configs=[{"seqlen": 1024}])

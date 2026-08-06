@@ -15,12 +15,14 @@ llm:
   # deepseek-v4-flash cache-miss rates (api-docs.deepseek.com, 2026-08)
   price_input_per_mtok: 0.14
   price_output_per_mtok: 0.28
+# Topology: framework runs directly ON the GPU machine (clone repo there,
+# `uv sync --extra dev`, `bash scripts/setup_host.sh`, launch with nvcc on
+# PATH). For the laptop-drives-GPU-over-ssh alternative, see README and use:
+#   kind: ssh / host: <alias> / scratch: "~/avo_scratch"
+#   env_activate: "export PATH=/usr/local/cuda/bin:$PATH && source ~/avo_scratch/venv/bin/activate"
 runner:
-  kind: ssh
-  host: asus   # ~/.ssh/config alias (tailscale MagicDNS)
-  scratch: "~/avo_scratch"
-  env_activate: "export PATH=/usr/local/cuda/bin:$PATH && source ~/avo_scratch/venv/bin/activate"
-  python: python3
+  kind: local
+  python: .venv/bin/python    # torch-enabled python (setup_host.sh installs into it)
   eval_timeout_s: 1800
 gpu_sheet: |
   NVIDIA GeForce RTX 3090 Ti (GA102, Ampere, sm_86): 84 SMs, 128 FP32 cores/SM,

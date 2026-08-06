@@ -9,14 +9,12 @@ llm:
   # REQUIRED before a live run: fill from the provider's pricing page.
   price_input_per_mtok: 0.0
   price_output_per_mtok: 0.0
-# Topology: the framework runs directly ON the H100 machine (clone the repo
-# there, `uv sync`, install a CUDA-13 torch into the env — see README).
-# Ensure /usr/local/cuda/bin (nvcc) is on PATH when launching `avo`.
-# For laptop-drives-GPU-over-ssh instead, copy the runner block from
-# configs/attention_3090.yaml and run scripts/provision_remote.sh.
+# Topology: framework runs directly ON the H100 machine (clone repo there,
+# `uv sync --extra dev`, `bash scripts/setup_host.sh`, launch with nvcc on
+# PATH: export PATH=/usr/local/cuda/bin:$PATH).
 runner:
   kind: local
-  python: python3             # must resolve to a torch-enabled python
+  python: .venv/bin/python    # torch-enabled python (setup_host.sh installs into it)
   eval_timeout_s: 1800
 gpu_sheet: |
   NVIDIA H100 (GH100, Hopper, sm_90a): 132 SMs, 228 KB shared/L1 per SM

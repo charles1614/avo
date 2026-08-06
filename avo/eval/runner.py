@@ -50,6 +50,18 @@ def _dec(x) -> str:
     return x.decode(errors="replace") if isinstance(x, bytes) else str(x)
 
 
+def resolve_python(python: str) -> str:
+    """Path-like interpreter settings (e.g. `.venv/bin/python`) resolve
+    against the framework's launch directory — the harness subprocess runs
+    with a staging temp dir as cwd, where a relative path would be wrong.
+    Bare command names (`python3`) stay as PATH lookups."""
+    if "/" in python:
+        # absolute() not resolve(): a venv's python is a symlink, and
+        # resolving it would bypass the venv (pyvenv.cfg lives beside the link)
+        return str(Path(python).absolute())
+    return python
+
+
 def _score_cmd(python: str, score_entry: str, params: dict) -> list[str]:
     return [python, f"harness/{score_entry}", "--workspace", "workspace",
             "--params-b64", encode_params(params), "--out", "result.json"]
@@ -73,7 +85,8 @@ class LocalRunner(Runner):
             staged = Path(td)
             shutil.copytree(workspace, staged / "workspace", ignore=COPY_IGNORE)
             shutil.copytree(harness, staged / "harness", ignore=COPY_IGNORE)
-            res = _run(_score_cmd(self.cfg.python, score_entry, params),
+            res = _run(_score_cmd(resolve_python(self.cfg.python), score_entry,
+                                  params),
                        cwd=staged, timeout_s=self.cfg.eval_timeout_s)
             if res.timed_out:
                 return ScoreResult.failure(

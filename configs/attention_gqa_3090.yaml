@@ -19,11 +19,8 @@ llm:
   price_input_per_mtok: 0.14
   price_output_per_mtok: 0.28
 runner:
-  kind: ssh
-  host: asus
-  scratch: "~/avo_scratch"
-  env_activate: "export PATH=/usr/local/cuda/bin:$PATH && source ~/avo_scratch/venv/bin/activate"
-  python: python3
+  kind: local                 # run on the GPU host (see attention_3090.yaml)
+  python: .venv/bin/python
   eval_timeout_s: 1800
 gpu_sheet: |
   NVIDIA GeForce RTX 3090 Ti (GA102, Ampere, sm_86): 84 SMs, 128 FP32 cores/SM,

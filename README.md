@@ -70,29 +70,35 @@ avo run --config configs/sort_py.yaml --confirm-spend
 avo dashboard --watch 30 --open          # live wandb-style dashboard
 ```
 
-**Kernel evolution.** Two topologies, chosen per config by `runner.kind`:
-
-*Directly on the GPU machine* (`kind: local` — e.g. clone this repo on the
-H100 box). The harness needs a torch-enabled python; point `runner.python`
-at it, or reuse the same env:
+**Kernel evolution — run directly on the GPU machine** (the default: all
+attention configs use `runner.kind: local`). Clone the repo on the box, then:
 
 ```bash
-uv sync --extra dev && uv pip install torch==2.13.0 --index-url \
-  https://download.pytorch.org/whl/cu130 ninja numpy   # match your CUDA toolkit
-avo eval-once  --config configs/attention_h100.yaml            # seed compiles + scores (no LLM)
-avo baselines  --config configs/attention_h100.yaml            # SDPA / FA3 lines
-avo run        --config configs/attention_h100.yaml --confirm-spend
+bash scripts/setup_host.sh        # CUDA-matched pinned torch + ninja into .venv (idempotent)
+export PATH=/usr/local/cuda/bin:$PATH        # nvcc for the harness compiles
+avo eval-once  --config configs/attention_3090.yaml            # seed compiles + scores (no LLM)
+avo baselines  --config configs/attention_3090.yaml            # SDPA / flash-attn lines
+avo run        --config configs/attention_3090.yaml --confirm-spend
+avo dashboard --watch 30 --open
 ```
 
-*Framework on your laptop, GPU over ssh* (`kind: ssh` — how the 3090 Ti runs
-here). One-time host provisioning (idempotent, pins the torch version):
+Same flow on an H100 with `configs/attention_h100.yaml` (paper grid, sm_90a).
+
+<details><summary>Alternative topology: framework on a laptop, GPU over ssh</summary>
+
+Set `runner: {kind: ssh, host: <alias>, scratch: "~/avo_scratch", env_activate:
+"export PATH=/usr/local/cuda/bin:$PATH && source ~/avo_scratch/venv/bin/activate"}`
+in the config, then provision the host once and preflight:
 
 ```bash
 bash scripts/provision_remote.sh <ssh-host>
 bash scripts/setup_remote.sh <ssh-host> \
   'export PATH=/usr/local/cuda/bin:$PATH && source ~/avo_scratch/venv/bin/activate'
-avo run --config configs/attention_3090.yaml --confirm-spend
 ```
+
+Evals then rsync the workspace to the host and run there; the agent gets a
+`gpu_shell` tool for remote probes (locally, plain `shell` reaches the GPU).
+</details>
 
 ## Commands
 
