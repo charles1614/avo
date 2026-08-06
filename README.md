@@ -2,7 +2,7 @@
 
 **An open reproduction of [*AVO: Agentic Variation Operators for Autonomous Evolutionary Search*](https://arxiv.org/abs/2603.24517) — an LLM coding agent replaces mutation and crossover in an evolutionary search, and autonomously evolves CUDA attention kernels.**
 
-![Python](https://img.shields.io/badge/python-3.10%2B-blue) ![Tests](https://img.shields.io/badge/tests-68%20passing%20offline-brightgreen) ![License](https://img.shields.io/badge/license-MIT-green) ![LLM](https://img.shields.io/badge/LLM-Anthropic%20%7C%20OpenAI--compatible-8A2BE2)
+![Python](https://img.shields.io/badge/python-3.10%2B-blue) ![Tests](https://img.shields.io/badge/tests-74%20passing%20offline-brightgreen) ![License](https://img.shields.io/badge/license-MIT-green) ![LLM](https://img.shields.io/badge/LLM-Anthropic%20%7C%20OpenAI--compatible-8A2BE2)
 
 The paper's core idea: instead of `Vary(P) = Generate(Sample(P))` with fixed heuristics, let an autonomous agent drive variation directly — **`Vary(P_t) = Agent(P_t, K, f)`** — with full access to the solution lineage `P_t`, a domain knowledge base `K`, and the scoring function `f`. This repo implements the complete architecture from scratch and applies it to BF16 attention kernels on consumer/datacenter NVIDIA GPUs (RTX 3090 Ti, H100), with a CPU-only toy task for zero-cost end-to-end validation.
 
@@ -38,21 +38,29 @@ flowchart LR
 
 **Toy task (pure-Python sort, deepseek-v4-flash, $0.30):** the agent took a bubble-sort seed to a hybrid insertion/counting/radix design — **14.9 → 4,320 kElem/s (~290×)** in 3 committed versions, including a gate-rejected regression and a committed revert. Full artifact: [`results/sort-py-20260805-184703/`](results/sort-py-20260805-184703/).
 
-**Attention forward (BF16, head_dim 128, RTX 3090 Ti):** evolution in progress. Reference points on the identical benchmark grid:
+**Attention forward (BF16, head_dim 128, RTX 3090 Ti, deepseek-v4-flash +
+thinking, $10.76 / 24 steps):** the agent took the deliberately-scalar seed to
+**+191%** through seven committed optimizations — fast-math softmax,
+vectorized 8/16-byte accesses, K/V-outer loop restructure, fused
+rescale-accumulate, FA2-style deferred rescaling, compile-time causal
+specialization. Paused on request (fully resumable); complete artifact incl.
+per-version git history and all agent transcripts:
+[`results/attention-3090-20260805-194458/`](results/attention-3090-20260805-194458/).
 
 | implementation | geomean TFLOPS |
 |---|---:|
 | PyTorch SDPA (flash) | 70.4 |
 | PyTorch SDPA (cuDNN) | 63.0 |
 | PyTorch SDPA (efficient) | 47.6 |
-| seed kernel (deliberately scalar) | 2.37 |
+| **AVO v0007 (evolved, still scalar)** | **6.93** |
+| seed kernel (deliberately scalar) | 2.38 |
 
 ## Quick start
 
 ```bash
 git clone <this-repo> && cd avo
 uv sync --extra dev --extra report       # exact env from uv.lock
-uv run pytest                            # 70 tests — no API key, network, or GPU
+uv run pytest                            # 74 tests — no API key, network, or GPU
 # without uv: python3 -m venv .venv && source .venv/bin/activate
 #             pip install -r requirements-lock.txt && pip install -e . --no-deps
 
@@ -145,12 +153,16 @@ avo/                  framework: agent loop · tools · LLM adapters · lineage 
                       dashboard/report
 tasks/sort_py/        CPU toy task (validates the loop for pennies)
 tasks/attention_cuda/ seed CUDA kernel + scoring harness (correctness vs FP32
-                      reference with BF16 error-floor tolerance; CUDA-event TFLOPS)
-knowledge_base/       curated notes + official NVIDIA docs + FA2/FA3 + CUTLASS
-                      (external sources pinned in MANIFEST.json)
-configs/              per-run YAML: task · LLM/provider · runner/host · grid · budgets
-scripts/              remote preflight · KB fetchers · freshness check · LLM smoke test
-results/              exported, committable run artifacts
+                      reference with BF16 error-floor tolerance; CUDA-event TFLOPS;
+                      GQA via kv_heads)
+tasks/kernelbench/    universal adapter for all 270 KernelBench problems
+knowledge_base/       curated notes + official NVIDIA docs + FA2/FA3 + CUTLASS +
+                      KernelBench (external sources pinned in MANIFEST.json)
+configs/              per-run YAML: task · LLM/provider · runner · grid · budgets
+scripts/              setup_host (on-box GPU env) · run_kernelbench (campaigns) ·
+                      KB fetchers + freshness check · llm_smoke · ssh-topology tools
+results/              exported, committable run artifacts (lineage, history
+                      bundle, final source, transcripts, dashboards)
 ```
 
 **Adding a new kernel task** requires zero framework changes: a task is a directory with `task.yaml`, a `seed/`, and a `harness/score.py` following the result-JSON contract (`{"correct": bool, "score": float, "configs": [...]}`). The CUDA build/timing utilities in `tasks/attention_cuda/harness/` are kernel-agnostic and copy-pastable.
