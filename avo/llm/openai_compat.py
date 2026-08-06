@@ -11,8 +11,10 @@ import json
 
 from avo.config import LLMConfig
 from avo.llm.base import LLMClient
-from avo.types import (AssistantTurn, ChatMessage, TextBlock, ToolResultBlock,
-                       ToolSpec, ToolUseBlock, Usage)
+from avo.types import (AssistantTurn, ChatMessage, TextBlock, ThinkingBlock,
+                       ToolResultBlock, ToolSpec, ToolUseBlock, Usage)
+
+REASONING_KEEP_CHARS = 8000  # keep enough truncated reasoning to be diagnosable
 
 
 def to_openai_messages(system: str, messages: list[ChatMessage]) -> list[dict]:
@@ -60,6 +62,7 @@ def assemble_stream(chunks: list[dict]) -> dict:
     keyed by index; the final usage-only chunk (stream_options include_usage)
     carries token counts."""
     content_parts: list[str] = []
+    reasoning_parts: list[str] = []
     tool_calls: dict[int, dict] = {}
     finish_reason = None
     usage = None
@@ -74,6 +77,9 @@ def assemble_stream(chunks: list[dict]) -> dict:
         delta = ch.get("delta") or {}
         if delta.get("content"):
             content_parts.append(delta["content"])
+        rc = delta.get("reasoning_content") or delta.get("reasoning")
+        if rc:
+            reasoning_parts.append(rc)
         for tc in delta.get("tool_calls") or []:
             slot = tool_calls.setdefault(
                 tc.get("index", 0),
@@ -87,6 +93,8 @@ def assemble_stream(chunks: list[dict]) -> dict:
             if fn.get("arguments"):
                 slot["function"]["arguments"] += fn["arguments"]
     message: dict = {"content": "".join(content_parts) or None}
+    if reasoning_parts:
+        message["reasoning_content"] = "".join(reasoning_parts)
     if tool_calls:
         message["tool_calls"] = [tool_calls[i] for i in sorted(tool_calls)]
     return {"choices": [{"message": message, "finish_reason": finish_reason}],
@@ -97,6 +105,11 @@ def parse_openai_choice(resp: dict) -> AssistantTurn:
     choice = resp["choices"][0]
     msg = choice.get("message", {})
     blocks: list = []
+    reasoning = msg.get("reasoning_content") or msg.get("reasoning")
+    if reasoning:
+        # visible to the loop (truncation diagnosis) and transcripts; never
+        # replayed to OpenAI-compat servers (serializer skips ThinkingBlock)
+        blocks.append(ThinkingBlock(thinking=reasoning[-REASONING_KEEP_CHARS:]))
     if msg.get("content"):
         blocks.append(TextBlock(text=msg["content"]))
     for tc in msg.get("tool_calls") or []:
@@ -131,10 +144,11 @@ class OpenAICompatClient(LLMClient):
                                      max_retries=3)
 
     def chat(self, system: str, messages: list[ChatMessage],
-             tools: list[ToolSpec] | None = None) -> AssistantTurn:
+             tools: list[ToolSpec] | None = None,
+             max_tokens: int | None = None) -> AssistantTurn:
         kwargs: dict = dict(
             model=self.cfg.model,
-            max_tokens=self.cfg.max_tokens,
+            max_tokens=max_tokens or self.cfg.max_tokens,
             messages=to_openai_messages(system, messages),
         )
         if tools:

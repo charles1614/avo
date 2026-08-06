@@ -65,10 +65,11 @@ class AnthropicClient(LLMClient):
         self._client = anthropic.Anthropic(api_key=api_key, max_retries=3)
 
     def chat(self, system: str, messages: list[ChatMessage],
-             tools: list[ToolSpec] | None = None) -> AssistantTurn:
+             tools: list[ToolSpec] | None = None,
+             max_tokens: int | None = None) -> AssistantTurn:
         kwargs: dict = dict(
             model=self.cfg.model,
-            max_tokens=self.cfg.max_tokens,
+            max_tokens=max_tokens or self.cfg.max_tokens,
             system=system,
             messages=to_anthropic_messages(messages),
         )

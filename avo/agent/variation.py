@@ -16,6 +16,17 @@ from avo.types import ChatMessage, TextBlock, ToolResultBlock
 NUDGE = ("Reminder: you must act through tools. Inspect the code, make an "
          "edit, `evaluate`, and `submit` when you have a verified improvement.")
 
+TRUNCATION_NUDGE = (
+    "Your previous turn produced no visible text and no tool call — your "
+    "reasoning almost certainly exhausted the output-token limit before "
+    "reaching an action. The limit has been RAISED for your next turn. Do NOT "
+    "restart the full analysis: state your conclusion in a few sentences and "
+    "emit a tool call NOW. A small concrete step (read_file / edit_file / "
+    "evaluate) beats finishing the whole plan in one turn.")
+
+MAX_EMPTY_STREAK = 3   # consecutive action-less turns before aborting the step
+TOKEN_ESCALATION_CAP = 4  # boost max_tokens up to 4x config on retries
+
 
 @dataclass
 class StepResult:
@@ -47,6 +58,8 @@ class VariationAgent:
         last_eval_brief = ""
         turns = 0
         stop_cause = "max_turns"
+        empty_streak = 0
+        max_tokens_boost: int | None = None
 
         while turns < self.max_turns:
             abort = self.budget_abort_fn()
@@ -55,15 +68,39 @@ class VariationAgent:
                 break
             turns += 1
             turn = self.llm.chat(system_prompt, truncate_context(messages),
-                                 self.registry.specs())
+                                 self.registry.specs(),
+                                 max_tokens=max_tokens_boost)
+            tool_uses = turn.message.tool_uses()
+            visible_empty = not tool_uses and not turn.message.text().strip()
             if not turn.message.blocks:
-                # degenerate empty turn (some providers emit these); a bare
-                # assistant message is invalid in replayed history
+                # a bare assistant message is invalid in replayed history
                 turn.message.blocks.append(TextBlock("(empty model turn)"))
             self.transcript.log("assistant", turn.message)
             messages.append(turn.message)
 
-            tool_uses = turn.message.tool_uses()
+            if visible_empty:
+                # reasoning models can burn the whole output budget thinking
+                # and emit nothing actionable; the generic nudge cannot break
+                # that loop — escalate the cap and demand an action instead
+                empty_streak += 1
+                if empty_streak >= MAX_EMPTY_STREAK:
+                    stop_cause = "truncated_reasoning"
+                    last_eval_brief = last_eval_brief or (
+                        f"step aborted: {empty_streak} consecutive turns "
+                        "produced no action (reasoning exhausted the "
+                        "output-token limit each time)")
+                    break
+                base = self.llm.cfg.max_tokens
+                max_tokens_boost = min(base * (2 ** empty_streak),
+                                       base * TOKEN_ESCALATION_CAP)
+                messages.append(ChatMessage("user", [TextBlock(TRUNCATION_NUDGE)]))
+                self.transcript.log("truncation_nudge",
+                                    {"streak": empty_streak,
+                                     "max_tokens_boost": max_tokens_boost})
+                continue
+            empty_streak = 0
+            max_tokens_boost = None
+
             if not tool_uses:
                 messages.append(ChatMessage("user", [TextBlock(NUDGE)]))
                 self.transcript.log("nudge", NUDGE)

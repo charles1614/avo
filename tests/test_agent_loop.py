@@ -91,6 +91,40 @@ def test_budget_abort_stops_loop(tmp_path):
     assert result.turns_used == 0
 
 
+def test_truncated_reasoning_escalates_then_aborts(tmp_path):
+    from avo.types import ThinkingBlock
+    # three reasoning-only turns (no text, no tools) = the GLM-5.2 failure mode
+    script = [[ThinkingBlock(thinking="analyzing mma fragment layout, cols 8-15 to")]
+              for _ in range(4)]
+    agent, llm = build_agent(tmp_path, script, max_turns=10)
+    result = agent.run_step("sys", "step")
+    assert not result.committed and result.stop_cause == "truncated_reasoning"
+    assert result.turns_used == 3  # aborted early, not burned to max_turns
+    # escalating max_tokens on retries: None, then 2x, then 4x of config (8192 fake)
+    boosts = [c["max_tokens"] for c in llm.calls]
+    base = llm.cfg.max_tokens
+    assert boosts == [None, base * 2, base * 4]
+    # targeted instruction, not the generic nudge
+    assert any("RAISED" in m.text() for c in llm.calls for m in c["messages"]
+               if m.role == "user")
+    assert "no action" in result.last_eval_brief
+
+
+def test_empty_streak_resets_on_action(tmp_path):
+    from avo.types import ThinkingBlock
+    script = [
+        [ThinkingBlock(thinking="thinking...")],          # empty turn
+        [tool_use("evaluate", "t1")],                     # action: streak resets
+        [ThinkingBlock(thinking="thinking again...")],    # empty turn (streak 1)
+        [tool_use("submit", "t2", message="ok")],
+    ]
+    agent, llm = build_agent(tmp_path, script, max_turns=10)
+    result = agent.run_step("sys", "step")
+    assert result.committed
+    # boost cleared after the action turn
+    assert llm.calls[2]["max_tokens"] is None
+
+
 def test_turn_warning_injected_near_budget(tmp_path):
     script = [[tool_use("evaluate", f"t{i}")] for i in range(4)] + \
              [[tool_use("submit", "s", message="ok")]]

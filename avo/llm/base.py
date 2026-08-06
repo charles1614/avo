@@ -17,8 +17,11 @@ class LLMClient(ABC):
 
     @abstractmethod
     def chat(self, system: str, messages: list[ChatMessage],
-             tools: list[ToolSpec] | None = None) -> AssistantTurn:
-        """One model call. Implementations must add to self.usage."""
+             tools: list[ToolSpec] | None = None,
+             max_tokens: int | None = None) -> AssistantTurn:
+        """One model call. Implementations must add to self.usage.
+        max_tokens overrides the config for this call only — the agent loop
+        escalates it when reasoning models truncate before acting."""
 
     @property
     def cost_usd(self) -> float:

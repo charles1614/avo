@@ -25,10 +25,10 @@ class FakeLLM(LLMClient):
         self.script = list(script)
         self.calls: list[dict] = []
 
-    def chat(self, system, messages, tools=None) -> AssistantTurn:
+    def chat(self, system, messages, tools=None, max_tokens=None) -> AssistantTurn:
         # snapshot: the agent mutates its message list across turns
         self.calls.append({"system": system, "messages": list(messages),
-                           "tools": tools})
+                           "tools": tools, "max_tokens": max_tokens})
         if not self.script:
             blocks = [TextBlock("(script exhausted)")]
         else:

@@ -107,6 +107,28 @@ def test_stream_assembly_matches_nonstreaming_shape():
     assert turn.usage.input_tokens == 12 and turn.usage.output_tokens == 7
 
 
+def test_stream_reasoning_captured_as_thinking_block():
+    from avo.llm.openai_compat import assemble_stream
+    from avo.types import ThinkingBlock
+    # a truncated-reasoning turn: reasoning deltas, no content, no tool calls
+    chunks = [
+        {"choices": [{"delta": {"reasoning_content": "analyzing mma "},
+                      "finish_reason": None}]},
+        {"choices": [{"delta": {"reasoning": "fragment layout"},
+                      "finish_reason": None}]},
+        {"choices": [{"delta": {}, "finish_reason": None}]},
+    ]
+    turn = parse_openai_choice(assemble_stream(chunks))
+    tb = turn.message.blocks[0]
+    assert isinstance(tb, ThinkingBlock)
+    assert "analyzing mma fragment layout" in tb.thinking
+    assert turn.message.text() == "" and not turn.message.tool_uses()
+    # and it is never replayed to OpenAI-compat servers
+    msgs = to_openai_messages("s", [ChatMessage("user", [TextBlock("q")]),
+                                    turn.message])
+    assert "analyzing mma" not in str(msgs)
+
+
 def test_stream_assembly_multiple_tool_calls():
     from avo.llm.openai_compat import assemble_stream
     chunks = [
