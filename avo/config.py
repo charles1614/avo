@@ -45,6 +45,11 @@ class RunnerConfig(BaseModel):
     arch_flags: list[str] = Field(default_factory=list)
     eval_timeout_s: int = 1800
     shell_timeout_s: int = 120
+    # Cross-process GPU mutex: multiple AVO runs on one GPU serialize their
+    # evals (accurate timing, no memory contention) while LLM turns overlap.
+    # Same path on all runs sharing the GPU; "" disables. For ssh runners the
+    # path is on the remote host (needs util-linux `flock`).
+    gpu_lock: str = "/tmp/avo_gpu.lock"
 
     def identity(self) -> str:
         """Part of the eval-cache key: same code on a different target != same eval."""

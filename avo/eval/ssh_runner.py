@@ -109,10 +109,15 @@ class SSHRunner(Runner):
 
         score_cmd = " ".join(shlex.quote(a) for a in
                              _score_cmd(self.cfg.python, score_entry, params))
+        inner = f"timeout {self.cfg.eval_timeout_s} {score_cmd}"
+        lock_wait = self.cfg.eval_timeout_s * 2 + 300
+        if self.cfg.gpu_lock:
+            # serialize with other AVO runs on the remote GPU (util-linux flock)
+            inner = (f"flock -w {lock_wait} {shlex.quote(self.cfg.gpu_lock)} "
+                     f"-c {shlex.quote(inner)}")
         remote_cmd = self._wrap_env(
-            f"cd {shlex.quote(remote_dir)} && rm -f result.json && "
-            f"timeout {self.cfg.eval_timeout_s} {score_cmd}")
-        run = self._ssh(remote_cmd, self.cfg.eval_timeout_s + 120)
+            f"cd {shlex.quote(remote_dir)} && rm -f result.json && {inner}")
+        run = self._ssh(remote_cmd, self.cfg.eval_timeout_s + lock_wait + 120)
         if run.timed_out or run.exit_code == 124:  # 124 = remote `timeout`
             return ScoreResult.failure(
                 "harness", f"eval timed out after {self.cfg.eval_timeout_s}s",

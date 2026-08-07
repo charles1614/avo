@@ -3,11 +3,15 @@ scoring harness (and ad-hoc shell commands) either locally or on a remote GPU
 host. The harness copy always comes from the pristine task directory."""
 from __future__ import annotations
 
+import fcntl
 import json
+import os
 import shutil
 import subprocess
 import tempfile
+import time
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from pathlib import Path
 
 from avo.config import RunnerConfig
@@ -50,6 +54,38 @@ def _dec(x) -> str:
     return x.decode(errors="replace") if isinstance(x, bytes) else str(x)
 
 
+@contextmanager
+def gpu_lock(path: str, wait_timeout_s: float):
+    """Exclusive cross-process lock serializing GPU evals from concurrent AVO
+    runs. Acquired BEFORE the eval subprocess starts, so waiting never eats
+    into the eval's own timeout. Auto-released on process death (flock)."""
+    if not path:
+        yield
+        return
+    f = open(os.path.expanduser(path), "w")
+    deadline = time.monotonic() + wait_timeout_s
+    try:
+        while True:
+            try:
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        f"GPU lock {path} still held after "
+                        f"{wait_timeout_s:.0f}s") from None
+                time.sleep(1)
+        f.write(str(os.getpid()))
+        f.flush()
+        yield
+    finally:
+        try:
+            fcntl.flock(f, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        f.close()
+
+
 def resolve_python(python: str) -> str:
     """Path-like interpreter settings (e.g. `.venv/bin/python`) resolve
     against the framework's launch directory — the harness subprocess runs
@@ -85,9 +121,14 @@ class LocalRunner(Runner):
             staged = Path(td)
             shutil.copytree(workspace, staged / "workspace", ignore=COPY_IGNORE)
             shutil.copytree(harness, staged / "harness", ignore=COPY_IGNORE)
-            res = _run(_score_cmd(resolve_python(self.cfg.python), score_entry,
-                                  params),
-                       cwd=staged, timeout_s=self.cfg.eval_timeout_s)
+            try:
+                with gpu_lock(self.cfg.gpu_lock,
+                              wait_timeout_s=self.cfg.eval_timeout_s * 2 + 300):
+                    res = _run(_score_cmd(resolve_python(self.cfg.python),
+                                          score_entry, params),
+                               cwd=staged, timeout_s=self.cfg.eval_timeout_s)
+            except TimeoutError as e:
+                return ScoreResult.failure("harness", str(e))
             if res.timed_out:
                 return ScoreResult.failure(
                     "harness", f"eval timed out after {self.cfg.eval_timeout_s}s",

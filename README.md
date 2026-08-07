@@ -108,6 +108,27 @@ Evals then rsync the workspace to the host and run there; the agent gets a
 `gpu_shell` tool for remote probes (locally, plain `shell` reaches the GPU).
 </details>
 
+## Multiple runs on one GPU
+
+Evolution runs are mostly LLM-bound; the GPU is only touched during evals. A
+cross-process **GPU lock** (`runner.gpu_lock`, default `/tmp/avo_gpu.lock`)
+serializes eval executions across concurrent AVO instances — benchmark timing
+stays exclusive and memory never contends — while all LLM turns overlap
+freely. So on one H100 you can run several experiments at once (different
+models, tasks, or configs) at high aggregate utilization:
+
+```bash
+nohup avo run --config configs/attention_h100.yaml      --confirm-spend > runA.log 2>&1 &
+nohup avo run --config configs/exp_glm52.yaml           --confirm-spend > runB.log 2>&1 &
+nohup python scripts/run_kernelbench.py --config ... --confirm-spend    > runC.log 2>&1 &
+```
+
+Rules: every config sharing the GPU keeps the same `gpu_lock` path (the
+default already does); use distinct `run_name`s; a queued eval waits for the
+lock without consuming its own timeout, and a crashed holder releases the
+lock automatically. Waits longer than 2×`eval_timeout_s` fail structured and
+non-cached, so the agent simply retries.
+
 ## KernelBench campaigns
 
 [KernelBench](https://github.com/ScalingIntelligence/KernelBench) (ICML'25,

@@ -39,6 +39,11 @@ python scripts/run_kernelbench.py --config configs/kernelbench_h100.yaml \
 6. Path-like `runner.python` values are resolved with `absolute()`, not
    `resolve()` — a venv's python is a symlink and following it bypasses the
    venv. Don't "fix" that.
+7. **Concurrent runs on one GPU are safe only because of `runner.gpu_lock`**
+   (default `/tmp/avo_gpu.lock`): eval subprocesses are serialized across
+   instances (timing accuracy + memory), LLM turns overlap. The lock is
+   acquired before the eval's timeout clock starts. Don't remove it, and
+   keep one shared path per GPU.
 
 ## Architecture in one breath
 
