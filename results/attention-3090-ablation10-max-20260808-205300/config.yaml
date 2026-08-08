@@ -1,0 +1,82 @@
+{
+ "run_name": "attention-3090-ablation10-max",
+ "task": "tasks/attention_cuda",
+ "llm": {
+  "provider": "openai_compat",
+  "model": "deepseek-v4-flash",
+  "base_url": "https://api.deepseek.com",
+  "api_key_env": "DEEPSEEK_API_KEY",
+  "max_tokens": 16384,
+  "temperature": null,
+  "stream": true,
+  "extra_body": {
+   "thinking": {
+    "type": "enabled"
+   },
+   "reasoning_effort": "max"
+  },
+  "price_input_per_mtok": 0.14,
+  "price_output_per_mtok": 0.28
+ },
+ "runner": {
+  "kind": "ssh",
+  "host": "asus",
+  "scratch": "~/avo_scratch",
+  "env_activate": "export PATH=/usr/local/cuda/bin:$PATH && source ~/avo_scratch/venv/bin/activate",
+  "python": "python3",
+  "arch_flags": [],
+  "eval_timeout_s": 1800,
+  "shell_timeout_s": 120,
+  "gpu_lock": "/tmp/avo_gpu.lock"
+ },
+ "task_params": {
+  "heads": 16,
+  "head_dim": 128,
+  "total_tokens": 8192,
+  "seqlens": [
+   1024,
+   2048,
+   4096,
+   8192
+  ],
+  "causal": [
+   false,
+   true
+  ],
+  "warmup": 10,
+  "repeats": 30,
+  "arch_flags": [
+   "-gencode",
+   "arch=compute_86,code=sm_86"
+  ],
+  "quick_overrides": {
+   "seqlens": [
+    1024,
+    4096
+   ],
+   "repeats": 10,
+   "warmup": 5
+  }
+ },
+ "budgets": {
+  "max_versions": 12,
+  "max_steps": 40,
+  "max_wall_clock_s": 86400,
+  "max_turns_per_step": 60,
+  "max_evals_per_step": 12,
+  "max_usd": 5.0,
+  "max_total_tokens": 60000000
+ },
+ "supervisor": {
+  "stagnation_steps": 2,
+  "min_rel_improvement": 0.01,
+  "window": 3
+ },
+ "kb_dirs": [
+  "knowledge_base"
+ ],
+ "gpu_sheet": "NVIDIA GeForce RTX 3090 Ti (GA102, Ampere, sm_86): 84 SMs, 128 FP32 cores/SM,\n4 Tensor Cores/SM (bf16 mma.sync m16n8k16), 128 KB L1/shared per SM (up to\n100 KB shared per block, >48 KB requires dynamic + cudaFuncAttribute),\ncp.async supported, NO TMA / wgmma / setmaxnreg (those are sm_90a only).\nPeak BF16 tensor ~160 TFLOPS (dense), ~40 TFLOPS FP32 FFMA. 1008 GB/s GDDR6X.\n",
+ "runs_dir": "runs",
+ "seed_dir": null,
+ "auto_profile": true
+}

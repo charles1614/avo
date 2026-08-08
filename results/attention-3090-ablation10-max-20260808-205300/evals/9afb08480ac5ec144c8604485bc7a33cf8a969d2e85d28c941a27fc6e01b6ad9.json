@@ -1,0 +1,13 @@
+{
+ "correct": false,
+ "score": 0.0,
+ "error": {
+  "stage": "correctness",
+  "detail": "config {'batch': 8, 'heads': 16, 'kv_heads': 16, 'seqlen': 1024, 'head_dim': 128, 'causal': False} trial 0: max_abs_err=0.55831 > threshold=0.01549",
+  "log_tail": ""
+ },
+ "configs": [],
+ "meta": {},
+ "eval_hash": "9afb08480ac5ec144c8604485bc7a33cf8a969d2e85d28c941a27fc6e01b6ad9",
+ "cached": false
+}

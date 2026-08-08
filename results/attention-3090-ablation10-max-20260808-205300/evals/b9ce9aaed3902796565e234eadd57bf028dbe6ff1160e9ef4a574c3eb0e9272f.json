@@ -1,0 +1,13 @@
+{
+ "correct": false,
+ "score": 0.0,
+ "error": {
+  "stage": "correctness",
+  "detail": "kernel raised on config {'batch': 8, 'heads': 16, 'kv_heads': 16, 'seqlen': 1024, 'head_dim': 128, 'causal': False}: AcceleratorError: CUDA error: an illegal memory access was encountered\nSearch for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.\nCUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.\nFor debugging consider passing CUDA_LAUNCH_BLOCKING=1\n",
+  "log_tail": "Traceback (most recent call last):\n  File \"/home/charles/avo_scratch/attention-3090-ablation10-max-20260808-205300/eval/harness/score.py\", line 81, in main\n    res = common.check_config(kernel_fn, cfg, seed)\n          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/charles/avo_scratch/attention-3090-ablation10-max-20260808-205300/eval/harness/common.py\", line 101, in check_config\n    out = kernel_fn(q, k, v, cfg[\"causal\"]).float()\n          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\ntorch.AcceleratorError: CUDA error: an illegal memory access was encountered\nSearch for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.\nCUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.\nFor debugging consider passing CUDA_LAUNCH_BLOCKING=1\n\n"
+ },
+ "configs": [],
+ "meta": {},
+ "eval_hash": "b9ce9aaed3902796565e234eadd57bf028dbe6ff1160e9ef4a574c3eb0e9272f",
+ "cached": false
+}

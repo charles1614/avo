@@ -1,0 +1,54 @@
+{
+ "geomeans": {
+  "sdpa_flash": 70.395,
+  "sdpa_cudnn": 62.97,
+  "sdpa_efficient": 47.647,
+  "sdpa_math": 5.869
+ },
+ "per_config": {
+  "sdpa_flash": {
+   "s1024_b8_full": 66.709,
+   "s2048_b4_full": 67.787,
+   "s4096_b2_full": 68.304,
+   "s8192_b1_full": 74.484,
+   "s1024_b8_causal": 67.193,
+   "s2048_b4_causal": 71.149,
+   "s4096_b2_causal": 73.27,
+   "s8192_b1_causal": 74.827
+  },
+  "sdpa_cudnn": {
+   "s1024_b8_full": 64.777,
+   "s2048_b4_full": 66.779,
+   "s4096_b2_full": 67.693,
+   "s8192_b1_full": 68.222,
+   "s1024_b8_causal": 52.511,
+   "s2048_b4_causal": 58.864,
+   "s4096_b2_causal": 62.123,
+   "s8192_b1_causal": 64.442
+  },
+  "sdpa_efficient": {
+   "s1024_b8_full": 45.642,
+   "s2048_b4_full": 47.869,
+   "s4096_b2_full": 50.396,
+   "s8192_b1_full": 50.995,
+   "s1024_b8_causal": 42.636,
+   "s2048_b4_causal": 46.223,
+   "s4096_b2_causal": 48.332,
+   "s8192_b1_causal": 49.664
+  },
+  "sdpa_math": {
+   "s1024_b8_full": 8.665,
+   "s2048_b4_full": 9.367,
+   "s4096_b2_full": 9.64,
+   "s1024_b8_causal": 3.603,
+   "s2048_b4_causal": 3.783,
+   "s4096_b2_causal": 3.834
+  }
+ },
+ "failures": {},
+ "gpu": "NVIDIA GeForce RTX 3090 Ti",
+ "torch": "2.13.0+cu130",
+ "cuda": "13.0",
+ "warmup": 10,
+ "repeats": 30
+}

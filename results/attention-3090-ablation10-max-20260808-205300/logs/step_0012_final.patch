@@ -1,0 +1,109 @@
+diff --git a/attention.cu b/attention.cu
+index da28fe0..9d288e4 100644
+--- a/attention.cu
++++ b/attention.cu
+@@ -133,30 +133,44 @@ attention_fwd_kernel(const __nv_bfloat16* __restrict__ q,
+         }
+         const int kv0 = nt * BLOCK_N;
+ 
+-        for (int i = 0; i < 2; ++i) {
+-            const int kvc = kv0 + 16 * i;
+-            const bool full_mask = CAUSAL && (kvc > m0 + 15);
+-            const bool may_mask = CAUSAL && !full_mask && (kvc + 15 >= m0) && (kvc <= m0 + 15);
+-            const bool kv_oob = (kvc + 15 >= seq_len);   // last tile may extend past seq_len
+-            for (int j = 0; j < 8; ++j) s_frag[i].x[j] = 0.f;
+-            if (full_mask) continue;
+-            for (int kt = 0; kt < 8; ++kt) {
+-                wmma::load_matrix_sync(k_frag, sK + (16 * i) * PADDED_D + kt * 16, PADDED_D);
+-                wmma::mma_sync(s_frag[i], q_frag[kt], k_frag, s_frag[i]);
+-            }
+-            for (int j = 0; j < 8; ++j) s_frag[i].x[j] *= scale;
+-            if (may_mask || kv_oob) {
+-                for (int j = 0; j < 8; ++j) {
+-                    const int rr = ((j & 2) ? 8 : 0) + lane / 4;
+-                    const int cc = 2 * (lane % 4) + (j & 1) + ((j & 4) ? 8 : 0);
+-                    if ((CAUSAL && kvc + cc > m0 + rr) || (kvc + cc >= seq_len))
+-                        s_frag[i].x[j] = -INFINITY;
++        // Both 16-col subtiles of this 32-col K tile are computed first, then a
++        // single online-softmax update covers the full 32 columns: one row max,
++        // one correction pair, one row sum. (Two subtile-local updates would
++        // apply a second correction to o_frag/l_prev -- 2 extra exps, 64+ muls.)
++        // A subtile entirely above the causal diagonal is skipped: its elements
++        // stay -inf so the merged max/sum treats them as zero contribution.
++        const bool skip0 = CAUSAL && (kv0 > m0 + 15);
++        const bool skip1 = CAUSAL && (kv0 + 16 > m0 + 15);
++        if (!(skip0 && skip1)) {
++            for (int i = 0; i < 2; ++i) {
++                const bool skip = i ? skip1 : skip0;
++                for (int j = 0; j < 8; ++j) s_frag[i].x[j] = skip ? -INFINITY : 0.f;
++                if (skip) continue;
++                const int kvc = kv0 + 16 * i;
++                const bool may_mask = CAUSAL && (kvc + 15 >= m0) && (kvc <= m0 + 15);
++                const bool kv_oob = (kvc + 15 >= seq_len);   // last tile may extend past seq_len
++                for (int kt = 0; kt < 8; ++kt) {
++                    wmma::load_matrix_sync(k_frag, sK + (16 * i) * PADDED_D + kt * 16, PADDED_D);
++                    wmma::mma_sync(s_frag[i], q_frag[kt], k_frag, s_frag[i]);
++                }
++                for (int j = 0; j < 8; ++j) s_frag[i].x[j] *= scale;
++                if (may_mask || kv_oob) {
++                    for (int j = 0; j < 8; ++j) {
++                        const int rr = ((j & 2) ? 8 : 0) + lane / 4;
++                        const int cc = 2 * (lane % 4) + (j & 1) + ((j & 4) ? 8 : 0);
++                        if ((CAUSAL && kvc + cc > m0 + rr) || (kvc + cc >= seq_len))
++                            s_frag[i].x[j] = -INFINITY;
++                    }
+                 }
+             }
+-            float tm0 = fmaxf(fmaxf(s_frag[i].x[0], s_frag[i].x[1]),
+-                              fmaxf(s_frag[i].x[4], s_frag[i].x[5]));
+-            float tm1 = fmaxf(fmaxf(s_frag[i].x[2], s_frag[i].x[3]),
+-                              fmaxf(s_frag[i].x[6], s_frag[i].x[7]));
++            float tm0 = fmaxf(fmaxf(s_frag[0].x[0], s_frag[0].x[1]),
++                              fmaxf(s_frag[0].x[4], s_frag[0].x[5]));
++            float tm1 = fmaxf(fmaxf(s_frag[0].x[2], s_frag[0].x[3]),
++                              fmaxf(s_frag[0].x[6], s_frag[0].x[7]));
++            tm0 = fmaxf(tm0, fmaxf(fmaxf(s_frag[1].x[0], s_frag[1].x[1]),
++                                   fmaxf(s_frag[1].x[4], s_frag[1].x[5])));
++            tm1 = fmaxf(tm1, fmaxf(fmaxf(s_frag[1].x[2], s_frag[1].x[3]),
++                                   fmaxf(s_frag[1].x[6], s_frag[1].x[7])));
+             tm0 = warp_max4(tm0); tm1 = warp_max4(tm1);
+             const float mn0 = fmaxf(m_prev[0], tm0), mn1 = fmaxf(m_prev[1], tm1);
+             const float corr0 = __expf(m_prev[0] - mn0), corr1 = __expf(m_prev[1] - mn1);
+@@ -164,11 +178,12 @@ attention_fwd_kernel(const __nv_bfloat16* __restrict__ q,
+                 for (int j = 0; j < 8; ++j)
+                     o_frag[o].x[j] *= ((j & 2) ? corr1 : corr0);
+             float ps0 = 0.f, ps1 = 0.f;
+-            for (int j = 0; j < 8; ++j) {
+-                const float p = __expf(s_frag[i].x[j] - ((j & 2) ? mn1 : mn0));
+-                s_frag[i].x[j] = p;
+-                if (j & 2) ps1 += p; else ps0 += p;
+-            }
++            for (int i = 0; i < 2; ++i)
++                for (int j = 0; j < 8; ++j) {
++                    const float p = __expf(s_frag[i].x[j] - ((j & 2) ? mn1 : mn0));
++                    s_frag[i].x[j] = p;
++                    if (j & 2) ps1 += p; else ps0 += p;
++                }
+             ps0 = warp_sum4(ps0); ps1 = warp_sum4(ps1);
+             l_prev[0] = l_prev[0] * corr0 + ps0;
+             l_prev[1] = l_prev[1] * corr1 + ps1;
+@@ -176,11 +191,14 @@ attention_fwd_kernel(const __nv_bfloat16* __restrict__ q,
+             // P·V mma: convert P to a bf16 fragment in registers (layout of the
+             // accumulator matches matrix_a row_major) and mma directly -- no
+             // shared round-trip. Correction factors were applied to o_frag above.
+-            wmma::fragment<wmma::matrix_a, 16, 16, 16, __nv_bfloat16, wmma::row_major> p_frag;
+-            for (int j = 0; j < 8; ++j) p_frag.x[j] = __float2bfloat16(s_frag[i].x[j]);
+-            for (int ot8 = 0; ot8 < 8; ++ot8) {
+-                wmma::load_matrix_sync(v_frag, sV + (16 * i) * PADDED_D + ot8 * 16, PADDED_D);
+-                wmma::mma_sync(o_frag[ot8], p_frag, v_frag, o_frag[ot8]);
++            for (int i = 0; i < 2; ++i) {
++                if (i ? skip1 : skip0) continue;   // all -inf: would poison the mma
++                wmma::fragment<wmma::matrix_a, 16, 16, 16, __nv_bfloat16, wmma::row_major> p_frag;
++                for (int j = 0; j < 8; ++j) p_frag.x[j] = __float2bfloat16(s_frag[i].x[j]);
++                for (int ot8 = 0; ot8 < 8; ++ot8) {
++                    wmma::load_matrix_sync(v_frag, sV + (16 * i) * PADDED_D + ot8 * 16, PADDED_D);
++                    wmma::mma_sync(o_frag[ot8], p_frag, v_frag, o_frag[ot8]);
++                }
+             }
+         }
+     }
