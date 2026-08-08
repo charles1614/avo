@@ -38,22 +38,23 @@ flowchart LR
 
 **Toy task (pure-Python sort, deepseek-v4-flash, $0.30):** the agent took a bubble-sort seed to a hybrid insertion/counting/radix design — **14.9 → 4,320 kElem/s (~290×)** in 3 committed versions, including a gate-rejected regression and a committed revert. Full artifact: [`results/sort-py-20260805-184703/`](results/sort-py-20260805-184703/).
 
-**Attention forward (BF16, head_dim 128, RTX 3090 Ti, deepseek-v4-flash +
-thinking, $10.76 / 24 steps):** the agent took the deliberately-scalar seed to
-**+191%** through seven committed optimizations — fast-math softmax,
-vectorized 8/16-byte accesses, K/V-outer loop restructure, fused
-rescale-accumulate, FA2-style deferred rescaling, compile-time causal
-specialization. Paused on request (fully resumable); complete artifact incl.
-per-version git history and all agent transcripts:
-[`results/attention-3090-20260805-194458/`](results/attention-3090-20260805-194458/).
+**Attention forward (BF16, head_dim 128, RTX 3090 Ti, deepseek-v4-flash):**
+with the final framework (persistent search trajectory, champion
+auto-profiling), a **$5 / 13-step** evolution took the deliberately-scalar
+seed to a debugged wmma tensor-core FlashAttention kernel — cp.async
+pipelining, profile-guided occupancy tuning, register-resident P/Q/O,
+deferred rescaling — **2.37 → 57.3 ± 0.2 TFLOPS (24×, verified over 5
+independent evals)**. Full four-run ablation (framework design × reasoning
+effort, with per-call LLM metrics): [`results/ablation_report.md`](results/ablation_report.md).
 
 | implementation | geomean TFLOPS |
 |---|---:|
 | PyTorch SDPA (flash) | 70.4 |
 | PyTorch SDPA (cuDNN) | 63.0 |
+| **AVO evolved champion (verified)** | **57.3 ± 0.2** |
 | PyTorch SDPA (efficient) | 47.6 |
-| **AVO v0007 (evolved, still scalar)** | **6.93** |
-| seed kernel (deliberately scalar) | 2.38 |
+| AVO first-framework run ($10.76, scalar-only) | 6.93 |
+| seed kernel (deliberately scalar) | 2.37 |
 
 ## Quick start
 

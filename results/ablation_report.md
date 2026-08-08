@@ -65,8 +65,22 @@ median turns barely reason (tool execution), planning turns run 20–80k chars.
 - Fresh arms were restarted twice at near-zero-cost boundaries (metrics logging; seed-profiling),
   identically for both arms. The old runs received mid-run fixes and are not clean arms.
 - The attention `profile.py` NVTX fix landed during the old arms (arm C-old saw one wrong-kernel profile).
-- Benchmark noise floor ~1% (median-of-30, thermals); final champions deserve multi-round
-  re-verification (mean±std appended below when available).
+- Benchmark noise floor ~1% (median-of-30, thermals); final champions re-verified below.
+
+## Champion re-verification (5 independent fresh evals each) — REVISES FINDING 3
+
+| champion | recorded at commit | verified mean ± std | Δ |
+|---|---:|---:|---:|
+| fresh B v0006 (high) | 57.69 | **57.33 ± 0.17** | −0.6% (confirms) |
+| fresh C v0002 (max) | 58.35 | **53.50 ± 0.11** | **−8.3% (does not reproduce)** |
+
+Arm C's committed 58.35 was an anomalously favorable measurement (tiny verified std rules out
+ordinary noise; a cold-GPU clock boost at eval time is the likely cause). The corrected verdict:
+**high's champion is genuinely faster (57.3 vs 53.5, 81% vs 76% of SDPA-flash)** — the
+"max catches up at the wire" narrative was partly measurement luck admitted by the
+matches-or-improves gate. This strengthens the risk conclusion: at matched budget, `high` won on
+endpoint, trajectory, AND measurement honesty. It is also a live demonstration of why final claims
+must come from multi-round re-verification, never from single gate-time scores.
 
 ## Artifacts
 
