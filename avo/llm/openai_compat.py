@@ -101,6 +101,19 @@ def assemble_stream(chunks: list[dict]) -> dict:
             "usage": usage}
 
 
+def extract_call_metrics(resp_dict: dict) -> dict:
+    """Per-call metrics from a (non-streaming-shaped) response dict.
+    reasoning_chars is the FULL length, before any in-context truncation."""
+    choice = (resp_dict.get("choices") or [{}])[0]
+    msg = choice.get("message", {})
+    reasoning = msg.get("reasoning_content") or msg.get("reasoning") or ""
+    return {"reasoning_chars": len(reasoning),
+            "text_chars": len(msg.get("content") or ""),
+            "n_tool_calls": len(msg.get("tool_calls") or []),
+            "finish_reason": choice.get("finish_reason"),
+            "usage": resp_dict.get("usage")}
+
+
 def parse_openai_choice(resp: dict) -> AssistantTurn:
     choice = resp["choices"][0]
     msg = choice.get("message", {})
@@ -157,10 +170,19 @@ class OpenAICompatClient(LLMClient):
             kwargs["temperature"] = self.cfg.temperature
         if self.cfg.extra_body:
             kwargs["extra_body"] = self.cfg.extra_body
+        import time as _time
+        t0 = _time.monotonic()
         if self.cfg.stream:
             resp_dict = self._create_streamed(kwargs)
         else:
             resp_dict = self._client.chat.completions.create(**kwargs).model_dump()
+        self._record_call({
+            **extract_call_metrics(resp_dict),
+            "latency_s": round(_time.monotonic() - t0, 2),
+            "n_messages": len(kwargs["messages"]),
+            "context_chars": sum(len(str(m)) for m in kwargs["messages"]),
+            "max_tokens": kwargs["max_tokens"],
+        })
         turn = parse_openai_choice(resp_dict)
         if turn.usage.total_tokens == 0:  # server omitted usage: estimate
             turn.usage = Usage(

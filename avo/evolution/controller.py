@@ -100,6 +100,7 @@ class Controller:
         self._lock_file.write(str(os.getpid()))
         self._lock_file.flush()
 
+        llm.metrics_path = self.logs_dir / "llm_metrics.jsonl"
         self.runner = make_runner(config.runner, self.run_dir.name)
         self.cache = EvalCache(self.run_dir / "evals")
         self.kb = KnowledgeBase([self.root / d for d in config.kb_dirs])

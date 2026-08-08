@@ -78,7 +78,23 @@ class AnthropicClient(LLMClient):
         if self.cfg.temperature is not None:
             kwargs["temperature"] = self.cfg.temperature
         kwargs.update(self.cfg.extra_body)  # e.g. thinking config
+        import time as _time
+        t0 = _time.monotonic()
         resp = self._client.messages.create(**kwargs)
-        turn = parse_anthropic_response(resp.model_dump())
+        resp_dict = resp.model_dump()
+        turn = parse_anthropic_response(resp_dict)
+        self._record_call({
+            "reasoning_chars": sum(len(c.get("thinking", ""))
+                                   for c in resp_dict.get("content", [])
+                                   if c.get("type") == "thinking"),
+            "text_chars": len(turn.message.text()),
+            "n_tool_calls": len(turn.message.tool_uses()),
+            "finish_reason": resp_dict.get("stop_reason"),
+            "usage": resp_dict.get("usage"),
+            "latency_s": round(_time.monotonic() - t0, 2),
+            "n_messages": len(kwargs["messages"]),
+            "context_chars": sum(len(str(m)) for m in kwargs["messages"]),
+            "max_tokens": kwargs["max_tokens"],
+        })
         self.usage.add(turn.usage)
         return turn

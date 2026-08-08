@@ -4,7 +4,10 @@ Everything outside avo/llm/ speaks only the canonical types from avo.types.
 """
 from __future__ import annotations
 
+import json
+import time
 from abc import ABC, abstractmethod
+from pathlib import Path
 
 from avo.config import LLMConfig
 from avo.types import AssistantTurn, ChatMessage, ToolSpec, Usage
@@ -14,6 +17,19 @@ class LLMClient(ABC):
     def __init__(self, cfg: LLMConfig):
         self.cfg = cfg
         self.usage = Usage()
+        # set by the controller: per-call JSONL (reasoning length, context
+        # size, usage, latency) for cross-model/cross-env comparison
+        self.metrics_path: Path | None = None
+
+    def _record_call(self, record: dict) -> None:
+        if self.metrics_path is None:
+            return
+        try:
+            with open(self.metrics_path, "a") as f:
+                f.write(json.dumps({"ts": time.time(), "model": self.cfg.model,
+                                    **record}) + "\n")
+        except OSError:
+            pass  # metrics must never break a run
 
     @abstractmethod
     def chat(self, system: str, messages: list[ChatMessage],

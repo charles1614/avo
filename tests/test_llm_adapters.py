@@ -161,6 +161,48 @@ def test_openai_empty_assistant_never_bare():
     assert assistant.get("content") or assistant.get("tool_calls")
 
 
+def test_extract_call_metrics_full_reasoning_length():
+    from avo.llm.openai_compat import extract_call_metrics
+    resp = {"choices": [{"message": {"content": "ok",
+                                     "reasoning_content": "x" * 50_000,
+                                     "tool_calls": [{"id": "a"}]},
+                         "finish_reason": "length"}],
+            "usage": {"completion_tokens": 16384,
+                      "completion_tokens_details": {"reasoning_tokens": 16000}}}
+    m = extract_call_metrics(resp)
+    assert m["reasoning_chars"] == 50_000  # full, not the 8k in-context cap
+    assert m["text_chars"] == 2 and m["n_tool_calls"] == 1
+    assert m["finish_reason"] == "length"
+    assert m["usage"]["completion_tokens_details"]["reasoning_tokens"] == 16000
+
+
+def test_client_writes_metrics_jsonl(tmp_path, monkeypatch):
+    import json
+
+    from avo.config import LLMConfig
+    from avo.llm.openai_compat import OpenAICompatClient
+
+    client = OpenAICompatClient(
+        LLMConfig(provider="openai_compat", model="m", stream=False,
+                  base_url="http://localhost:1/v1"), api_key="dummy")
+    client.metrics_path = tmp_path / "llm_metrics.jsonl"
+
+    class FakeResp:
+        def model_dump(self):
+            return {"choices": [{"message": {"content": "hi",
+                                             "reasoning_content": "abc"},
+                                 "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 5, "completion_tokens": 3}}
+
+    monkeypatch.setattr(client._client.chat.completions, "create",
+                        lambda **kw: FakeResp())
+    client.chat("sys", [ChatMessage("user", [TextBlock("q")])])
+    rec = json.loads(client.metrics_path.read_text().splitlines()[0])
+    assert rec["reasoning_chars"] == 3 and rec["model"] == "m"
+    assert rec["n_messages"] == 2 and "latency_s" in rec
+    assert rec["usage"]["completion_tokens"] == 3
+
+
 def test_openai_tool_error_prefixed():
     convo = [ChatMessage("user", [ToolResultBlock(tool_use_id="t9",
                                                   content="boom", is_error=True)])]
