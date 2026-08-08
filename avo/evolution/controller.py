@@ -209,8 +209,11 @@ class Controller:
                 raise RuntimeError(f"seed fails its own scoring: {seed.brief()}")
             self.lineage.record_seed(seed.score, seed.eval_hash or "")
             log(f"[avo] seed committed as v0000, score={seed.score:.4f}")
-            # the seed is the first champion: profile it so even step 1
-            # starts from a diagnosis instead of guessing the bottleneck
+        # every run (fresh or resumed) starts with a profile of the current
+        # champion when one is missing — but never off a dirty workspace,
+        # which would profile the failed attempt instead of the champion
+        if (self.lineage.entries() and not self.state.get("champion_profile")
+                and not self.state.get("workspace_dirty")):
             self._auto_profile_champion(log)
 
         while True:

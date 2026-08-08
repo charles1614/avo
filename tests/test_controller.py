@@ -192,6 +192,19 @@ def test_auto_profile_champion_injected_into_next_step(project):
     first_prompt = llm.calls[0]["messages"][0].text()
     assert "Profile of the best committed version" in first_prompt
 
+    # resume with a missing champion profile backfills it (clean workspace)
+    ctrl.state["champion_profile"] = ""
+    ctrl.state["workspace_dirty"] = False
+    ctrl.state_path.write_text(json.dumps(ctrl.state))
+    ctrl._lock_file.close()
+    cfg2 = make_config(budgets={"max_versions": 2, "max_steps": 2,
+                                "max_turns_per_step": 3, "max_evals_per_step": 4,
+                                "max_usd": 10.0, "max_total_tokens": 100000})
+    ctrl2 = Controller(cfg2, FakeLLM([[TextBlock("idle")], [TextBlock("s")]]),
+                       project_root=project, run_dir=ctrl.run_dir)
+    ctrl2.run(log=lambda *a: None)
+    assert "compute-bound at 11% SOL" in ctrl2.state.get("champion_profile", "")
+
 
 def test_run_dir_lock_rejects_second_controller(project):
     script = [[set_value("2.0")], [tool_use("submit", "s1", message="b2")]]
