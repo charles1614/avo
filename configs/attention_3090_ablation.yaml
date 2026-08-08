@@ -1,0 +1,58 @@
+# Ablation arm: same task/grid/budget class as the 2026-08-05 baseline run
+# (results/attention-3090-20260805-194458: v0007 = 6.93 TFLOPS for $10.76),
+# but with the CURRENT framework from step 1: thinking mode, streaming,
+# profile tool (ncu), quick evals, failed-patch carry-forward, split-write
+# guidance. Measures what the harness improvements are worth at equal spend.
+# Mac-driven over ssh (the baseline's topology).
+run_name: attention-3090-ablation10
+task: tasks/attention_cuda
+llm:
+  provider: openai_compat
+  model: deepseek-v4-flash
+  base_url: https://api.deepseek.com
+  api_key_env: DEEPSEEK_API_KEY
+  max_tokens: 16384
+  extra_body:
+    thinking:
+      type: enabled
+    reasoning_effort: high
+  price_input_per_mtok: 0.14
+  price_output_per_mtok: 0.28
+runner:
+  kind: ssh
+  host: asus
+  scratch: "~/avo_scratch"
+  env_activate: "export PATH=/usr/local/cuda/bin:$PATH && source ~/avo_scratch/venv/bin/activate"
+  python: python3
+  eval_timeout_s: 1800
+gpu_sheet: |
+  NVIDIA GeForce RTX 3090 Ti (GA102, Ampere, sm_86): 84 SMs, 128 FP32 cores/SM,
+  4 Tensor Cores/SM (bf16 mma.sync m16n8k16), 128 KB L1/shared per SM (up to
+  100 KB shared per block, >48 KB requires dynamic + cudaFuncAttribute),
+  cp.async supported, NO TMA / wgmma / setmaxnreg (those are sm_90a only).
+  Peak BF16 tensor ~160 TFLOPS (dense), ~40 TFLOPS FP32 FFMA. 1008 GB/s GDDR6X.
+task_params:
+  heads: 16
+  head_dim: 128
+  total_tokens: 8192
+  seqlens: [1024, 2048, 4096, 8192]
+  causal: [false, true]
+  warmup: 10
+  repeats: 30
+  arch_flags: ["-gencode", "arch=compute_86,code=sm_86"]
+  quick_overrides:
+    seqlens: [1024, 4096]
+    repeats: 10
+    warmup: 5
+budgets:
+  max_versions: 12
+  max_steps: 40
+  max_wall_clock_s: 86400
+  max_turns_per_step: 60
+  max_evals_per_step: 12
+  max_usd: 10.0
+  max_total_tokens: 60000000
+supervisor:
+  stagnation_steps: 2
+  min_rel_improvement: 0.01
+  window: 3
