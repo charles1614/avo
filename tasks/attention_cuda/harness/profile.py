@@ -45,10 +45,14 @@ import build as builder
 import common
 cfg = json.loads(sys.argv[1])
 mod = builder.build(sys.argv[2], json.loads(sys.argv[3]))
-q, k, v = common.make_qkv(cfg, seed=0)
-for _ in range(4):
-    mod.attention_forward(q, k, v, cfg["causal"])
+q, k, v = common.make_qkv(cfg, seed=0)   # randn kernels stay OUTSIDE the range
+for _ in range(3):
+    mod.attention_forward(q, k, v, cfg["causal"])   # warmup, outside the range
 torch.cuda.synchronize()
+torch.cuda.nvtx.range_push("avo_profile")
+mod.attention_forward(q, k, v, cfg["causal"])
+torch.cuda.synchronize()
+torch.cuda.nvtx.range_pop()
 """
 
 
@@ -122,8 +126,10 @@ def main() -> None:
     cfg = configs[idx]
 
     Path("_profile_target.py").write_text(TARGET_SCRIPT)
-    cmd = [ncu, "--csv", "--launch-skip", "2", "--launch-count", "1",
-           "--target-processes", "all"]
+    # NVTX-scoped: only the post-warmup attention launch is profiled — never
+    # the randn input-generation kernels (--launch-skip counted those too)
+    cmd = [ncu, "--csv", "--nvtx", "--nvtx-include", "avo_profile/",
+           "--launch-count", "4", "--target-processes", "all"]
     for s in NCU_SECTIONS:
         cmd += ["--section", s]
     cmd += [sys.executable, "_profile_target.py", json.dumps(cfg),
