@@ -40,18 +40,26 @@ def test_attention_ncu_parse_and_summary():
     assert "attention_fwd_kernel" in summary and "compute_sol_pct" in summary
 
 
-def test_kernelbench_summary_ranks_by_duration():
+def test_kernelbench_two_stage_rendering():
     prof = load_harness("tasks/kernelbench/harness/profile.py", "kb_prof")
+    stage1 = {"ops": [{"name": "aten::linear", "device_us": 900.0, "calls": 24},
+                      {"name": "aten::gelu", "device_us": 100.0, "calls": 24}],
+              "kernels": [{"name": "sm90_gemm_kernel", "device_us": 850.0,
+                           "calls": 24},
+                          {"name": "gelu_kernel", "device_us": 95.0,
+                           "calls": 24}]}
+    s1 = prof.render_stage1(stage1)
+    assert s1.index("aten::linear") < s1.index("aten::gelu")
+    assert "sm90_gemm_kernel" in s1 and "89.9%" in s1  # 850/945
+
     header = ('"ID","Process ID","Process Name","Host Name","Kernel Name",'
               '"Context","Stream","Section Name","Metric Name","Metric Unit",'
               '"Metric Value"')
-    rows_csv = "\n".join([header] + [
-        f'"{i}","1","p","h","kernel_{name}","1","7","S","Duration","usecond","{dur}"'
-        for i, (name, dur) in enumerate([("small", "10.0"), ("big", "900.0"),
-                                         ("mid", "100.0")])])
-    summary, ranked = prof.summarize(prof.parse_ncu_csv(rows_csv))
-    assert ranked[0]["_kernel"] == "kernel_big"
-    assert summary.index("kernel_big") < summary.index("kernel_mid")
+    csv_text = "\n".join([header,
+        '"0","1","p","h","sm90_gemm_kernel","1","7","S","Compute (SM) Throughput","%","72.4"',
+        '"0","1","p","h","sm90_gemm_kernel","1","7","S","Memory Throughput","%","31.0"'])
+    s2 = prof.render_stage2(prof.parse_ncu_csv(csv_text))
+    assert "sm90_gemm_kernel" in s2 and "72.4" in s2 and "Reading:" in s2
 
 
 def test_profile_tool_registration_and_plumbing(tmp_path):
