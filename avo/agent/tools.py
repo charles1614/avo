@@ -55,6 +55,7 @@ class ToolContext:
     # returns (committed, verdict_text)
     submit_fn: Callable[[str], "tuple[bool, str]"]
     runner: Runner | None = None  # SSH runner => gpu_shell available
+    profile_fn: Callable[..., ScoreResult] | None = None  # task ships profile.py
     shell_timeout_s: int = 60
     gpu_shell_timeout_s: int = 120
     evals_used: int = 0
@@ -127,6 +128,18 @@ class ToolRegistry:
                   "message = concise description of the change (used as commit message).",
                   {"message": {"type": "string"}}, ["message"]),
         ]
+        if self.ctx.profile_fn is not None:
+            s.insert(-1, _spec(
+                "profile",
+                "Profile the current workspace's kernel(s) with Nsight Compute "
+                "(ncu) in the pristine scoring environment: memory vs compute "
+                "throughput (%SOL), achieved occupancy, registers/thread, "
+                "shared memory, launch shape. Use it to DIAGNOSE the bottleneck "
+                "before choosing an optimization. Counts against the eval "
+                "budget; slower than evaluate.",
+                {"config_index": {"type": "integer",
+                                  "description": "benchmark-grid config to profile (default 0)"}},
+                []))
         if self.ctx.runner is not None:
             s.insert(5, _spec(
                 "gpu_shell",
@@ -280,6 +293,21 @@ class ToolRegistry:
         if quick:
             note += " [QUICK eval — reduced grid; submit re-scores the full grid]"
         return ToolOutcome(result.to_json() + note, is_error=not result.correct)
+
+    def _t_profile(self, config_index: int = 0) -> ToolOutcome:
+        if self.ctx.profile_fn is None:
+            return ToolOutcome("profiling not available for this task", is_error=True)
+        if self._budget_left() <= 0:
+            return ToolOutcome("eval budget exhausted for this step", is_error=True)
+        self.ctx.evals_used += 1
+        result = self.ctx.profile_fn(config_index=config_index)
+        if not result.correct:
+            err = result.error or {}
+            return ToolOutcome(f"profiling failed ({err.get('stage')}): "
+                               f"{err.get('detail', '')[:800]}", is_error=True)
+        summary = result.meta.get("summary", "(no profile summary)")
+        return ToolOutcome(truncate_middle(summary, OUTPUT_CAP)
+                           + f"\n[evals remaining this step: {self._budget_left()}]")
 
     def _t_submit(self, message: str) -> ToolOutcome:
         if self._budget_left() <= 0:

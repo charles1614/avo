@@ -27,6 +27,9 @@ correct AND score >= {best_score:.4f} (the current best committed score).
   incremental improvements — a committed +10% beats an uncommitted +50%.
 - `evaluate` EARLY (including the unmodified workspace, to see the scoring
   output format) and often; do not perfect a large change without evaluating.
+- When a `profile` tool is available, use it to DIAGNOSE before optimizing:
+  memory-bound vs compute-bound (%SOL), occupancy, registers/spills tell you
+  which optimization class can pay off — don't guess what a profile can tell.
 - Use kb_search/kb_read before nontrivial hardware-specific work, but budget
   research: start implementing before half your turns are spent.
 - Large files: never emit more than ~150 lines in one write_file/edit_file

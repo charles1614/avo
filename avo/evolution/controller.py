@@ -178,6 +178,24 @@ class Controller:
             result.eval_hash = key
         return result
 
+    def profile_workspace(self, config_index: int = 0) -> ScoreResult:
+        """Run the task's profile.py harness entry (ncu diagnostics) through
+        the same staging/lock/cache pipeline as scoring."""
+        harness = self.task_dir / self.task.harness_dir
+        base = {**self.config.task_params, "_entry": "profile",
+                "profile_config_index": int(config_index)}
+        base.pop("quick_overrides", None)
+        key = eval_key(self.lineage.workspace, harness, base,
+                       self.runner.identity())
+        hit = self.cache.get(key)
+        if hit is not None:
+            return hit
+        result = self.runner.score(self.lineage.workspace, harness,
+                                   "profile.py", base)
+        if cacheable(result):
+            self.cache.put(key, result)
+        return result
+
     # -- main loop -----------------------------------------------------------------
 
     def run(self, log=print) -> dict:
@@ -234,12 +252,14 @@ class Controller:
         best_score = best.score if best else 0.0
         transcript = Transcript(self.logs_dir / f"step_{step:04d}.jsonl")
 
+        has_profiler = (self.task_dir / self.task.harness_dir / "profile.py").exists()
         ctx = ToolContext(
             workspace=self.lineage.workspace,
             kb=self.kb,
             evaluate_fn=self.evaluate_workspace,
             submit_fn=lambda msg: self._submit(step, msg, log),
             runner=self.runner if self.config.runner.kind == "ssh" else None,
+            profile_fn=self.profile_workspace if has_profiler else None,
             max_evals=self.config.budgets.max_evals_per_step,
         )
         registry = ToolRegistry(ctx)
