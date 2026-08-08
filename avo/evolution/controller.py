@@ -284,7 +284,9 @@ class Controller:
                               f"step_{step - 1:04d}_final.patch"):
                 patch_file = self.logs_dir / candidate
                 if patch_file.exists():
-                    prev_patch = patch_file.read_text()[:8000]
+                    # tensor-core kernel diffs run 15-25 KB; truncating the
+                    # carried patch forces each step to reconstruct the rest
+                    prev_patch = patch_file.read_text()[:28_000]
                     break
         step_prompt = build_step_prompt(self.lineage.entries(),
                                         self.lineage.last_commit_diff(),
