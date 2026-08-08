@@ -50,7 +50,7 @@ budgets:
   max_wall_clock_s: 86400
   max_turns_per_step: 60
   max_evals_per_step: 12
-  max_usd: 10.0
+  max_usd: 5.0
   max_total_tokens: 60000000
 supervisor:
   stagnation_steps: 2
