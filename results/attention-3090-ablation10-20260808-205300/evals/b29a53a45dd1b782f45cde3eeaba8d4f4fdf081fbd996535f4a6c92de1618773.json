@@ -1,0 +1,112 @@
+{
+ "correct": true,
+ "score": 32.76671187658402,
+ "error": null,
+ "configs": [
+  {
+   "batch": 8,
+   "heads": 16,
+   "kv_heads": 16,
+   "seqlen": 1024,
+   "head_dim": 128,
+   "causal": false,
+   "max_abs_err": 0.0015977025032043457,
+   "err_threshold": 0.017035795211791993,
+   "median_ms": 2.075648069381714,
+   "tflops": 33.107479899745194
+  },
+  {
+   "batch": 4,
+   "heads": 16,
+   "kv_heads": 16,
+   "seqlen": 2048,
+   "head_dim": 128,
+   "causal": false,
+   "max_abs_err": 0.0009004175662994385,
+   "err_threshold": 0.01685507392883301,
+   "median_ms": 4.058112144470215,
+   "tflops": 33.86770709608928
+  },
+  {
+   "batch": 2,
+   "heads": 16,
+   "kv_heads": 16,
+   "seqlen": 4096,
+   "head_dim": 128,
+   "causal": false,
+   "max_abs_err": 0.0005377084016799927,
+   "err_threshold": 0.013542545795440675,
+   "median_ms": 8.026031970977783,
+   "tflops": 34.24829454180614
+  },
+  {
+   "batch": 1,
+   "heads": 16,
+   "kv_heads": 16,
+   "seqlen": 8192,
+   "head_dim": 128,
+   "causal": false,
+   "max_abs_err": 0.00036448240280151367,
+   "err_threshold": 0.0041499117612838745,
+   "median_ms": 15.968480110168457,
+   "tflops": 34.427560424985266
+  },
+  {
+   "batch": 8,
+   "heads": 16,
+   "kv_heads": 16,
+   "seqlen": 1024,
+   "head_dim": 128,
+   "causal": true,
+   "max_abs_err": 0.008553743362426758,
+   "err_threshold": 0.032627655029296876,
+   "median_ms": 1.1673599481582642,
+   "tflops": 29.433713587834777
+  },
+  {
+   "batch": 4,
+   "heads": 16,
+   "kv_heads": 16,
+   "seqlen": 2048,
+   "head_dim": 128,
+   "causal": true,
+   "max_abs_err": 0.008163213729858398,
+   "err_threshold": 0.028259230613708497,
+   "median_ms": 2.184191942214966,
+   "tflops": 31.462196800484627
+  },
+  {
+   "batch": 2,
+   "heads": 16,
+   "kv_heads": 16,
+   "seqlen": 4096,
+   "head_dim": 128,
+   "causal": true,
+   "max_abs_err": 0.010811805725097656,
+   "err_threshold": 0.023627830505371095,
+   "median_ms": 4.215552091598511,
+   "tflops": 32.60283599529285
+  },
+  {
+   "batch": 1,
+   "heads": 16,
+   "kv_heads": 16,
+   "seqlen": 8192,
+   "head_dim": 128,
+   "causal": true,
+   "max_abs_err": 0.009502172470092773,
+   "err_threshold": 0.02596004104614258,
+   "median_ms": 8.257023811340332,
+   "tflops": 33.290191868706756
+  }
+ ],
+ "meta": {
+  "gpu": "NVIDIA GeForce RTX 3090 Ti",
+  "torch": "2.13.0+cu130",
+  "cuda": "13.0",
+  "warmup": 10,
+  "repeats": 30
+ },
+ "eval_hash": "b29a53a45dd1b782f45cde3eeaba8d4f4fdf081fbd996535f4a6c92de1618773",
+ "cached": false
+}

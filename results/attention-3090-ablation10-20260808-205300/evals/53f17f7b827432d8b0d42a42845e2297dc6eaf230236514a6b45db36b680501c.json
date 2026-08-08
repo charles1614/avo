@@ -1,0 +1,64 @@
+{
+ "correct": true,
+ "score": 48.984044835366966,
+ "error": null,
+ "configs": [
+  {
+   "batch": 8,
+   "heads": 16,
+   "kv_heads": 16,
+   "seqlen": 1024,
+   "head_dim": 128,
+   "causal": false,
+   "max_abs_err": 0.0012304484844207764,
+   "err_threshold": 0.013962937355041505,
+   "median_ms": 1.3628479838371277,
+   "tflops": 50.42343500594897
+  },
+  {
+   "batch": 2,
+   "heads": 16,
+   "kv_heads": 16,
+   "seqlen": 4096,
+   "head_dim": 128,
+   "causal": false,
+   "max_abs_err": 0.0005333125591278076,
+   "err_threshold": 0.007467163562774658,
+   "median_ms": 5.281792163848877,
+   "tflops": 52.04254510910074
+  },
+  {
+   "batch": 8,
+   "heads": 16,
+   "kv_heads": 16,
+   "seqlen": 1024,
+   "head_dim": 128,
+   "causal": true,
+   "max_abs_err": 0.008852958679199219,
+   "err_threshold": 0.030094696044921876,
+   "median_ms": 0.7729440033435822,
+   "tflops": 44.45307579768714
+  },
+  {
+   "batch": 2,
+   "heads": 16,
+   "kv_heads": 16,
+   "seqlen": 4096,
+   "head_dim": 128,
+   "causal": true,
+   "max_abs_err": 0.008241653442382812,
+   "err_threshold": 0.03192789649963379,
+   "median_ms": 2.7847360372543335,
+   "tflops": 49.3543918106905
+  }
+ ],
+ "meta": {
+  "gpu": "NVIDIA GeForce RTX 3090 Ti",
+  "torch": "2.13.0+cu130",
+  "cuda": "13.0",
+  "warmup": 5,
+  "repeats": 10
+ },
+ "eval_hash": "53f17f7b827432d8b0d42a42845e2297dc6eaf230236514a6b45db36b680501c",
+ "cached": false
+}

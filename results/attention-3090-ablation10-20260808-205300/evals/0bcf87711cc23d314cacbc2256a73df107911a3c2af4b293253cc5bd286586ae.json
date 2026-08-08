@@ -1,0 +1,35 @@
+{
+ "correct": true,
+ "score": 0.0,
+ "error": null,
+ "configs": [],
+ "meta": {
+  "summary": "ncu profile of config {'batch': 8, 'heads': 16, 'kv_heads': 16, 'seqlen': 1024, 'head_dim': 128, 'causal': False} (one launch, after warmup):\n\n## <unnamed>::attention_fwd_kernel(const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, __nv_bfloat16 *, in\n  duration                   2,254,688 ns\n  compute_sol_pct            40.38 %\n  memory_sol_pct             40.38 %\n  dram_sol_pct               6.09 %\n  achieved_occupancy_pct     8.33 %\n  theoretical_occupancy_pct  8.33 %\n  registers_per_thread       180 register/thread\n  static_smem_per_block      0 byte/block\n  dynamic_smem_per_block     96,256 byte/block\n  grid                       2,048\n  block                      128\n  waves_per_sm               24.38\n\nReading: compute_sol vs memory_sol tells you the bound (both low => latency/occupancy bound). Low achieved vs theoretical occupancy => launch config or register pressure. High registers_per_thread with spills => rebalance or reduce live state.",
+  "metrics": {
+   "<unnamed>::attention_fwd_kernel(const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, __nv_bfloat16 *, int, float, bool, int, int)": {
+    "memory_sol_pct": "40.38 %",
+    "dram_sol_pct": "6.09 %",
+    "duration": "2,254,688 ns",
+    "compute_sol_pct": "40.38 %",
+    "block": "128",
+    "grid": "2,048",
+    "registers_per_thread": "180 register/thread",
+    "dynamic_smem_per_block": "96,256 byte/block",
+    "static_smem_per_block": "0 byte/block",
+    "waves_per_sm": "24.38",
+    "theoretical_occupancy_pct": "8.33 %",
+    "achieved_occupancy_pct": "8.33 %"
+   }
+  },
+  "profiled_config": {
+   "batch": 8,
+   "heads": 16,
+   "kv_heads": 16,
+   "seqlen": 1024,
+   "head_dim": 128,
+   "causal": false
+  }
+ },
+ "eval_hash": "0bcf87711cc23d314cacbc2256a73df107911a3c2af4b293253cc5bd286586ae",
+ "cached": false
+}

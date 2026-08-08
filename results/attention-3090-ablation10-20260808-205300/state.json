@@ -1,0 +1,14 @@
+{
+ "steps_done": 13,
+ "stagnation": 2,
+ "failure_summaries": [
+  "step 12: ",
+  "step 13: **Summary of variation step**\n\n**What was attempted:** No source change was generated. The final diff is empty (`no changes were made`), so this step did not actually test a new kernel or layout variant.\n\n**Why it failed:** Not a compile error, correctness failure, or performance regression. The step simply produced no candidate. With no diff, there was nothing to benchmark or commit.\n\n**Correctness / performance context:** The last baseline evaluation was valid and correct:\n- `correct: true`\n- `score: 53.788885632537735`\n- Config A: batch=8, heads=16, kv_heads=16, seqlen=1024, head_dim=128, causal=false \u2192 median 1.2478 ms (55.07 TFLOPS)\n- Config B: batch=2, heads=16, kv_heads=16, seqlen=4096, head_dim=128, causal=false \u2192 median 4.7027 ms (58.45 TFLOPS)\n\nThese numbers are the reference point for the next attempt.\n\n**Preserved artifacts:** None. The empty diff contains no design decisions, tile/layout choices, or code fragments to reuse.\n\n**What to avoid / retry differently:** Avoid repeating an empty variation. The next attempt should start from the committed baseline and make a concrete change\u2014for example:\n- Tune tile sizes or swizzle order for the two evaluated shapes.\n- Add warp"
+ ],
+ "elapsed_s": 12367.221841499966,
+ "input_tokens": 33349014,
+ "output_tokens": 1202173,
+ "workspace_dirty": false,
+ "usd": 5.0055,
+ "champion_profile": "ncu profile of config {'batch': 8, 'heads': 16, 'kv_heads': 16, 'seqlen': 1024, 'head_dim': 128, 'causal': False} (one launch, after warmup):\n\n## <unnamed>::attention_fwd_kernel(const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, __nv_bfloat16 *, in\n  duration                   1,250,112 ns\n  compute_sol_pct            72.05 %\n  memory_sol_pct             72.05 %\n  dram_sol_pct               13.25 %\n  achieved_occupancy_pct     31.97 %\n  theoretical_occupancy_pct  33.33 %\n  registers_per_thread       128 register/thread\n  static_smem_per_block      0 byte/block\n  dynamic_smem_per_block     17,408 byte/block\n  grid                       2,048\n  block                      128\n  waves_per_sm               6.10\n\nReading: compute_sol vs memory_sol tells you the bound (both low => latency/occupancy bound). Low achieved vs theoretical occupancy => launch config or register pressure. High registers_per_thread with spills => rebalance or reduce live state."
+}

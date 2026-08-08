@@ -1,0 +1,323 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+
+<title>AVO · attention-3090-ablation10-20260808-205300</title>
+<style>
+  :root {
+    color-scheme: light;
+    --page: #f9f9f7; --surface: #fcfcfb;
+    --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+    --grid: #e1e0d9; --axis: #c3c2b7; --ring: rgba(11,11,11,.10);
+    --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100;
+    --good: #0ca30c; --critical: #d03b3b; --good-text: #006300;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --page: #0d0d0d; --surface: #1a1a19;
+      --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
+      --grid: #2c2c2a; --axis: #383835; --ring: rgba(255,255,255,.10);
+      --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500;
+      --good-text: #0ca30c;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --page: #0d0d0d; --surface: #1a1a19;
+    --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
+    --grid: #2c2c2a; --axis: #383835; --ring: rgba(255,255,255,.10);
+    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500;
+    --good-text: #0ca30c;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body { background: var(--page); color: var(--ink);
+         font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+         padding: 20px; }
+  .wrap { max-width: 1180px; margin: 0 auto; display: grid; gap: 14px; }
+  header { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  header h1 { font-size: 17px; font-weight: 650; }
+  header .sub { color: var(--muted); font-size: 12px; }
+  .pill { font-size: 11px; padding: 2px 9px; border-radius: 99px;
+          border: 1px solid var(--ring); color: var(--ink-2); }
+  .pill.live::before { content: "●"; color: var(--good); margin-right: 5px; }
+  button.tgl { margin-left: auto; background: var(--surface); color: var(--ink-2);
+          border: 1px solid var(--ring); border-radius: 7px; padding: 4px 10px;
+          font: inherit; font-size: 12px; cursor: pointer; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+  .tile { background: var(--surface); border: 1px solid var(--ring);
+          border-radius: 10px; padding: 12px 14px; }
+  .tile .k { font-size: 11px; color: var(--muted); text-transform: uppercase;
+             letter-spacing: .04em; }
+  .tile .v { font-size: 24px; font-weight: 650; margin-top: 2px; }
+  .tile .d { font-size: 12px; color: var(--ink-2); margin-top: 1px; }
+  .tile .d.up { color: var(--good-text); }
+  .card { background: var(--surface); border: 1px solid var(--ring);
+          border-radius: 10px; padding: 14px 16px; overflow-x: auto; }
+  .card h2 { font-size: 13px; font-weight: 650; color: var(--ink-2); margin-bottom: 8px; }
+  .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 900px) { .row2 { grid-template-columns: 1fr; } }
+  svg { display: block; width: 100%; height: auto; }
+  svg text { font: 11px system-ui, sans-serif; fill: var(--muted);
+             font-variant-numeric: tabular-nums; }
+  .legend { display: flex; gap: 16px; font-size: 12px; color: var(--ink-2);
+            margin: 6px 2px 0; flex-wrap: wrap; }
+  .legend .sw { display: inline-block; width: 10px; height: 10px;
+                border-radius: 3px; margin-right: 5px; vertical-align: -1px; }
+  #tip { position: fixed; pointer-events: none; background: var(--surface);
+         border: 1px solid var(--ring); border-radius: 8px; padding: 8px 10px;
+         font-size: 12px; color: var(--ink); box-shadow: 0 4px 14px rgba(0,0,0,.18);
+         opacity: 0; transition: opacity .08s; max-width: 340px; z-index: 9; }
+  #tip .t { color: var(--muted); font-size: 11px; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th { text-align: left; color: var(--muted); font-weight: 550; font-size: 11px;
+       text-transform: uppercase; letter-spacing: .04em; }
+  th, td { padding: 6px 10px 6px 0; border-bottom: 1px solid var(--grid); }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  td .delta { color: var(--good-text); font-size: 12px; }
+  .steps { display: flex; gap: 4px; flex-wrap: wrap; }
+  .stepbx { width: 26px; height: 26px; border-radius: 6px; border: 1px solid var(--ring);
+            display: grid; place-items: center; font-size: 11px; color: var(--ink-2);
+            position: relative; cursor: default; }
+  .stepbx.committed { background: var(--good); color: #fff; border-color: transparent; }
+  .stepbx .zap { position: absolute; top: -7px; right: -5px; font-size: 10px; }
+  footer { color: var(--muted); font-size: 11px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>AVO kernel evolution</h1>
+    <span class="sub" id="runname"></span>
+    <span class="pill" id="status"></span>
+    <button class="tgl" id="theme">◐ theme</button>
+  </header>
+  <div class="tiles" id="tiles"></div>
+  <div class="card">
+    <h2>Score per committed version — geomean TFLOPS, baselines dashed
+        <button class="tgl" id="logscale" style="float:right">log scale</button></h2>
+    <div id="mainchart"></div>
+  </div>
+  <div class="row2">
+    <div class="card">
+      <h2>Latest kernel vs best baseline — per benchmark config (TFLOPS)</h2>
+      <div id="cfgchart"></div>
+      <div class="legend" id="cfglegend"></div>
+    </div>
+    <div class="card">
+      <h2>Variation steps <span style="color:var(--muted);font-weight:400">
+          (✓ committed · ⚡ supervisor guidance · hover for detail)</span></h2>
+      <div class="steps" id="steps"></div>
+      <h2 style="margin-top:14px">Supervisor interventions</h2>
+      <div id="sup" style="font-size:12px;color:var(--ink-2)"></div>
+    </div>
+  </div>
+  <div class="card">
+    <h2>Lineage</h2>
+    <table id="lin"><thead><tr>
+      <th>version</th><th>step</th><th class="num">score</th>
+      <th class="num">Δ vs seed</th><th>change</th></tr></thead><tbody></tbody></table>
+  </div>
+  <footer id="foot"></footer>
+</div>
+<div id="tip"></div>
+<script>
+const D = {"run": "attention-3090-ablation10-20260808-205300", "generated_at": "2026-08-09 00:25:06", "running": false, "lineage": [{"version": "v0000", "step": 0, "commit": "0c6897aae3713e0cd83c893f570f1ed5cdee6d2f", "score": 2.3683118013635553, "message": "seed", "eval_hash": "a4fc5f5036a1290145413b3a160573400ec2da20abf2c923a277391a99e11243", "parent": null, "timestamp": "2026-08-08T12:54:00.589790+00:00", "configs": [{"batch": 8, "heads": 16, "kv_heads": 16, "seqlen": 1024, "head_dim": 128, "causal": false, "max_abs_err": 0.0014773011207580566, "err_threshold": 0.014768255710601808, "median_ms": 28.609392166137695, "tflops": 2.401990099507844}, {"batch": 4, "heads": 16, "kv_heads": 16, "seqlen": 2048, "head_dim": 128, "causal": false, "max_abs_err": 0.0009323656558990479, "err_threshold": 0.011146796703338624, "median_ms": 57.46585464477539, "tflops": 2.391662915684062}, {"batch": 2, "heads": 16, "kv_heads": 16, "seqlen": 4096, "head_dim": 128, "causal": false, "max_abs_err": 0.0004794597625732422, "err_threshold": 0.005376143217086792, "median_ms": 116.44750595092773, "tflops": 2.3605306502643053}, {"batch": 1, "heads": 16, "kv_heads": 16, "seqlen": 8192, "head_dim": 128, "causal": false, "max_abs_err": 0.0004421621561050415, "err_threshold": 0.005330545663833618, "median_ms": 234.8369903564453, "tflops": 2.3410103027362}, {"batch": 8, "heads": 16, "kv_heads": 16, "seqlen": 1024, "head_dim": 128, "causal": true, "max_abs_err": 0.007791280746459961, "err_threshold": 0.028820110321044923, "median_ms": 14.974303722381592, "tflops": 2.294580035574118}, {"batch": 4, "heads": 16, "kv_heads": 16, "seqlen": 2048, "head_dim": 128, "causal": true, "max_abs_err": 0.00780487060546875, "err_threshold": 0.02869756317138672, "median_ms": 29.04678440093994, "tflops": 2.3658204566621928}, {"batch": 2, "heads": 16, "kv_heads": 16, "seqlen": 4096, "head_dim": 128, "causal": true, "max_abs_err": 0.007720947265625, "err_threshold": 0.028679681777954102, "median_ms": 57.52926445007324, "tflops": 2.3890267811658945}, {"batch": 1, "heads": 16, "kv_heads": 16, "seqlen": 8192, "head_dim": 128, "causal": true, "max_abs_err": 0.007729768753051758, "err_threshold": 0.029222084045410157, "median_ms": 114.3454704284668, "tflops": 2.40392475464046}]}, {"version": "v0001", "step": 5, "commit": "5dfa047330c36fd77094ffb17040fe50c835869a", "score": 32.76671187658402, "message": "Fix online-softmax O rescaling: interleave PV mma inside the per-tile loop so o_frag *= exp(m_prev-m_new) multiplies already-accumulated O (was multiplying zeros since PV ran after all 4 tiles). Add OOB key masking for seq_len % 64 != 0. FA2-style sm_86 wmma m16n16k16 kernel, cp.async double-buffered K/V, padded smem, GQA support. 31.8 TFLOPS vs 2.37 seed.", "eval_hash": "b29a53a45dd1b782f45cde3eeaba8d4f4fdf081fbd996535f4a6c92de1618773", "parent": "v0000", "timestamp": "2026-08-08T14:20:37.855456+00:00", "configs": [{"batch": 8, "heads": 16, "kv_heads": 16, "seqlen": 1024, "head_dim": 128, "causal": false, "max_abs_err": 0.0015977025032043457, "err_threshold": 0.017035795211791993, "median_ms": 2.075648069381714, "tflops": 33.107479899745194}, {"batch": 4, "heads": 16, "kv_heads": 16, "seqlen": 2048, "head_dim": 128, "causal": false, "max_abs_err": 0.0009004175662994385, "err_threshold": 0.01685507392883301, "median_ms": 4.058112144470215, "tflops": 33.86770709608928}, {"batch": 2, "heads": 16, "kv_heads": 16, "seqlen": 4096, "head_dim": 128, "causal": false, "max_abs_err": 0.0005377084016799927, "err_threshold": 0.013542545795440675, "median_ms": 8.026031970977783, "tflops": 34.24829454180614}, {"batch": 1, "heads": 16, "kv_heads": 16, "seqlen": 8192, "head_dim": 128, "causal": false, "max_abs_err": 0.00036448240280151367, "err_threshold": 0.0041499117612838745, "median_ms": 15.968480110168457, "tflops": 34.427560424985266}, {"batch": 8, "heads": 16, "kv_heads": 16, "seqlen": 1024, "head_dim": 128, "causal": true, "max_abs_err": 0.008553743362426758, "err_threshold": 0.032627655029296876, "median_ms": 1.1673599481582642, "tflops": 29.433713587834777}, {"batch": 4, "heads": 16, "kv_heads": 16, "seqlen": 2048, "head_dim": 128, "causal": true, "max_abs_err": 0.008163213729858398, "err_threshold": 0.028259230613708497, "median_ms": 2.184191942214966, "tflops": 31.462196800484627}, {"batch": 2, "heads": 16, "kv_heads": 16, "seqlen": 4096, "head_dim": 128, "causal": true, "max_abs_err": 0.010811805725097656, "err_threshold": 0.023627830505371095, "median_ms": 4.215552091598511, "tflops": 32.60283599529285}, {"batch": 1, "heads": 16, "kv_heads": 16, "seqlen": 8192, "head_dim": 128, "causal": true, "max_abs_err": 0.009502172470092773, "err_threshold": 0.02596004104614258, "median_ms": 8.257023811340332, "tflops": 33.290191868706756}]}, {"version": "v0002", "step": 6, "commit": "20272862c12adccabc4bc294ff6f707155a5eb46", "score": 45.77794173722182, "message": "Shrink smem to 39,936 B (BLOCK_N 64->32, single-buffered K/V) so 2 blocks fit per SM: occupancy 8.3%->16.4%, latency-bound kernel speeds up 32.8->~44 TFLOPS. Also fix load_tile row count (Q needs BLOCK_M rows, not BLOCK_N).", "eval_hash": "2c128a9f3586f1fe0f13de2f04cfc266f0a1ef8ae5a059db1049bc146fa03838", "parent": "v0001", "timestamp": "2026-08-08T14:30:54.184397+00:00", "configs": [{"batch": 8, "heads": 16, "kv_heads": 16, "seqlen": 1024, "head_dim": 128, "causal": false, "max_abs_err": 0.0015243887901306152, "err_threshold": 0.016208601951599122, "median_ms": 1.4643199443817139, "tflops": 46.929277306958845}, {"batch": 4, "heads": 16, "kv_heads": 16, "seqlen": 2048, "head_dim": 128, "causal": false, "max_abs_err": 0.0006841421127319336, "err_threshold": 0.008777929306030274, "median_ms": 2.873679995536804, "tflops": 47.826812200892384}, {"batch": 2, "heads": 16, "kv_heads": 16, "seqlen": 4096, "head_dim": 128, "causal": false, "max_abs_err": 0.0005299150943756104, "err_threshold": 0.008986485958099366, "median_ms": 5.7047038078308105, "tflops": 48.184430989506744}, {"batch": 1, "heads": 16, "kv_heads": 16, "seqlen": 8192, "head_dim": 128, "causal": false, "max_abs_err": 0.0003503561019897461, "err_threshold": 0.004084436058998108, "median_ms": 11.362815856933594, "tflops": 48.38200502497265}, {"batch": 8, "heads": 16, "kv_heads": 16, "seqlen": 1024, "head_dim": 128, "causal": true, "max_abs_err": 0.009696245193481445, "err_threshold": 0.03565890884399414, "median_ms": 0.8298560082912445, "tflops": 41.40445815262589}, {"batch": 4, "heads": 16, "kv_heads": 16, "seqlen": 2048, "head_dim": 128, "causal": true, "max_abs_err": 0.008758544921875, "err_threshold": 0.028303457260131837, "median_ms": 1.573855996131897, "tflops": 43.66312858666451}, {"batch": 2, "heads": 16, "kv_heads": 16, "seqlen": 4096, "head_dim": 128, "causal": true, "max_abs_err": 0.008296012878417969, "err_threshold": 0.032334400177001954, "median_ms": 3.059791922569275, "tflops": 44.91774504607292}, {"batch": 1, "heads": 16, "kv_heads": 16, "seqlen": 8192, "head_dim": 128, "causal": true, "max_abs_err": 0.007654905319213867, "err_threshold": 0.0257495174407959, "median_ms": 6.055855989456177, "tflops": 45.39042992808757}]}, {"version": "v0003", "step": 7, "commit": "a107100fb8a03b2b282f59d253150fa3c50c3331", "score": 51.32343924692174, "message": "BLOCK_N 32->16 (smem 39,936->29,184 B) + launch_bounds(128,3): 3 blocks/SM instead of 2 -> 12 warps in flight (occupancy 16.4%->24.3%), latency-bound kernel +11.5% (43.95->48.98 quick, all configs +10-13%). 168 regs, negligible spill.", "eval_hash": "c5481ea2bdc44bb03fcfb7baf49b9df27d56bfa726f513cab176ae9cc9ccb358", "parent": "v0002", "timestamp": "2026-08-08T14:38:10.263283+00:00", "configs": [{"batch": 8, "heads": 16, "kv_heads": 16, "seqlen": 1024, "head_dim": 128, "causal": false, "max_abs_err": 0.0014525651931762695, "err_threshold": 0.017582012176513673, "median_ms": 1.321984052658081, "tflops": 51.982076937938416}, {"batch": 4, "heads": 16, "kv_heads": 16, "seqlen": 2048, "head_dim": 128, "causal": false, "max_abs_err": 0.0009420216083526611, "err_threshold": 0.009414000272750855, "median_ms": 2.5835518836975098, "tflops": 53.19767500674345}, {"batch": 2, "heads": 16, "kv_heads": 16, "seqlen": 4096, "head_dim": 128, "causal": false, "max_abs_err": 0.0005671083927154541, "err_threshold": 0.00598884916305542, "median_ms": 5.097872018814087, "tflops": 53.92012705096205}, {"batch": 1, "heads": 16, "kv_heads": 16, "seqlen": 8192, "head_dim": 128, "causal": false, "max_abs_err": 0.00032053887844085693, "err_threshold": 0.0050006935596466065, "median_ms": 10.153088092803955, "tflops": 54.14666049018543}, {"batch": 8, "heads": 16, "kv_heads": 16, "seqlen": 1024, "head_dim": 128, "causal": true, "max_abs_err": 0.008774280548095703, "err_threshold": 0.02946670150756836, "median_ms": 0.7495039999485016, "tflops": 45.84330219766787}, {"batch": 4, "heads": 16, "kv_heads": 16, "seqlen": 2048, "head_dim": 128, "causal": true, "max_abs_err": 0.009331941604614258, "err_threshold": 0.031684471130371095, "median_ms": 1.3972480297088623, "tflops": 49.18201727600127}, {"batch": 2, "heads": 16, "kv_heads": 16, "seqlen": 4096, "head_dim": 128, "causal": true, "max_abs_err": 0.00795888900756836, "err_threshold": 0.02849490737915039, "median_ms": 2.7007360458374023, "tflops": 50.88944315155577}, {"batch": 1, "heads": 16, "kv_heads": 16, "seqlen": 8192, "head_dim": 128, "causal": true, "max_abs_err": 0.00872802734375, "err_threshold": 0.02368791198730469, "median_ms": 5.289232015609741, "tflops": 51.969341887966344}]}, {"version": "v0004", "step": 8, "commit": "052fa901526cf8083581a828a5e7cf4fec6dbe5e", "score": 53.76062054871438, "message": "Feed softmaxed P to the PV matmul directly from registers: wmma m16n16k16 matrix_a row_major layout == accumulator layout, so P converts in-place to bf16 and skips the 3,072 B shared-memory round-trip (writes + ldmatrix per tile). Also parametrize load_tile with an explicit pitch. smem 29,184->26,112 B.", "eval_hash": "2efade1b9dd1284d9d35fe607f93f020bca63d7fb6489ce729eb9654808bda8f", "parent": "v0003", "timestamp": "2026-08-08T14:52:31.922153+00:00", "configs": [{"batch": 8, "heads": 16, "kv_heads": 16, "seqlen": 1024, "head_dim": 128, "causal": false, "max_abs_err": 0.0017104744911193848, "err_threshold": 0.019593668937683106, "median_ms": 1.276416003704071, "tflops": 53.83783698776952}, {"batch": 4, "heads": 16, "kv_heads": 16, "seqlen": 2048, "head_dim": 128, "causal": false, "max_abs_err": 0.0009531676769256592, "err_threshold": 0.012166930198669434, "median_ms": 2.4995839595794678, "tflops": 54.984731737165916}, {"batch": 2, "heads": 16, "kv_heads": 16, "seqlen": 4096, "head_dim": 128, "causal": false, "max_abs_err": 0.0008349120616912842, "err_threshold": 0.007992310285568238, "median_ms": 4.979040145874023, "tflops": 55.20700755381191}, {"batch": 1, "heads": 16, "kv_heads": 16, "seqlen": 8192, "head_dim": 128, "causal": false, "max_abs_err": 0.0003605559468269348, "err_threshold": 0.004105074167251587, "median_ms": 9.919487953186035, "tflops": 55.421793592825956}, {"batch": 8, "heads": 16, "kv_heads": 16, "seqlen": 1024, "head_dim": 128, "causal": true, "max_abs_err": 0.01055765151977539, "err_threshold": 0.03127439117431641, "median_ms": 0.6969760060310364, "tflops": 49.29830879496583}, {"batch": 4, "heads": 16, "kv_heads": 16, "seqlen": 2048, "head_dim": 128, "causal": true, "max_abs_err": 0.007828235626220703, "err_threshold": 0.03333051300048828, "median_ms": 1.3066240549087524, "tflops": 52.593151394873864}, {"batch": 2, "heads": 16, "kv_heads": 16, "seqlen": 4096, "head_dim": 128, "causal": true, "max_abs_err": 0.008702754974365234, "err_threshold": 0.02953965759277344, "median_ms": 2.5480480194091797, "tflops": 53.93891811500013}, {"batch": 1, "heads": 16, "kv_heads": 16, "seqlen": 8192, "head_dim": 128, "causal": true, "max_abs_err": 0.008843660354614258, "err_threshold": 0.028182579040527345, "median_ms": 4.989920139312744, "tflops": 55.08663450911633}]}, {"version": "v0005", "step": 10, "commit": "4eb5ee63202305db2374c0be5db9a3561be8ef96", "score": 57.33134114476901, "message": "Q/O straight from gmem registers (drop smem staging), BLOCK_N 16->32 (halves tile iterations/barriers), conditional O-rescale skipped when running max unchanged", "eval_hash": "0717a301af1ecab248ea6d64503c2982a0ff481768761a5f473c673a73da167b", "parent": "v0004", "timestamp": "2026-08-08T15:24:37.132808+00:00", "configs": [{"batch": 8, "heads": 16, "kv_heads": 16, "seqlen": 1024, "head_dim": 128, "causal": false, "max_abs_err": 0.0017904043197631836, "err_threshold": 0.020205808639526368, "median_ms": 1.1811840534210205, "tflops": 58.1784663761505}, {"batch": 4, "heads": 16, "kv_heads": 16, "seqlen": 2048, "head_dim": 128, "causal": false, "max_abs_err": 0.0008327960968017578, "err_threshold": 0.00969247317314148, "median_ms": 2.277999997138977, "tflops": 60.3331666569862}, {"batch": 2, "heads": 16, "kv_heads": 16, "seqlen": 4096, "head_dim": 128, "causal": false, "max_abs_err": 0.0005745291709899902, "err_threshold": 0.007984770298004151, "median_ms": 4.447743892669678, "tflops": 61.80164901064245}, {"batch": 1, "heads": 16, "kv_heads": 16, "seqlen": 8192, "head_dim": 128, "causal": false, "max_abs_err": 0.00034862011671066284, "err_threshold": 0.00416987931728363, "median_ms": 8.809616088867188, "tflops": 62.40406032934088}, {"batch": 8, "heads": 16, "kv_heads": 16, "seqlen": 1024, "head_dim": 128, "causal": true, "max_abs_err": 0.009963035583496094, "err_threshold": 0.030535770416259767, "median_ms": 0.675247997045517, "tflops": 50.88462093680803}, {"batch": 4, "heads": 16, "kv_heads": 16, "seqlen": 2048, "head_dim": 128, "causal": true, "max_abs_err": 0.00848841667175293, "err_threshold": 0.031351877212524415, "median_ms": 1.2801120281219482, "tflops": 53.68239281121224}, {"batch": 2, "heads": 16, "kv_heads": 16, "seqlen": 4096, "head_dim": 128, "causal": true, "max_abs_err": 0.008303165435791016, "err_threshold": 0.030074668884277345, "median_ms": 2.461535930633545, "tflops": 55.834632256059024}, {"batch": 1, "heads": 16, "kv_heads": 16, "seqlen": 8192, "head_dim": 128, "causal": true, "max_abs_err": 0.007687568664550781, "err_threshold": 0.025552345275878907, "median_ms": 4.86246395111084, "tflops": 56.530579909225565}]}, {"version": "v0006", "step": 11, "commit": "ffd28560dda8457ba6904728d7d0b416b626cd94", "score": 57.6949987357298, "message": "Causal block-order reversal: launch the heaviest (latest) query-row blocks first so all SMs start their long causal tile chains immediately (LPT scheduling); improves causal tail latency.", "eval_hash": "bfb3bc3e8e61397921b8e4fc52730d311bc13175cdd9710234c739c582d3e62b", "parent": "v0005", "timestamp": "2026-08-08T15:49:57.719859+00:00", "configs": [{"batch": 8, "heads": 16, "kv_heads": 16, "seqlen": 1024, "head_dim": 128, "causal": false, "max_abs_err": 0.0011585354804992676, "err_threshold": 0.010788870811462403, "median_ms": 1.149440050125122, "tflops": 59.78517690289246}, {"batch": 4, "heads": 16, "kv_heads": 16, "seqlen": 2048, "head_dim": 128, "causal": false, "max_abs_err": 0.0009791553020477295, "err_threshold": 0.012154174804687501, "median_ms": 2.2778719663619995, "tflops": 60.336557761630665}, {"batch": 2, "heads": 16, "kv_heads": 16, "seqlen": 4096, "head_dim": 128, "causal": false, "max_abs_err": 0.0005656182765960693, "err_threshold": 0.0070686469078063965, "median_ms": 4.478943824768066, "tflops": 61.371144113028485}, {"batch": 1, "heads": 16, "kv_heads": 16, "seqlen": 8192, "head_dim": 128, "causal": false, "max_abs_err": 0.00035309046506881714, "err_threshold": 0.004041908144950867, "median_ms": 8.872960090637207, "tflops": 61.95855816686307}, {"batch": 8, "heads": 16, "kv_heads": 16, "seqlen": 1024, "head_dim": 128, "causal": true, "max_abs_err": 0.008609533309936523, "err_threshold": 0.031113697052001954, "median_ms": 0.6789119839668274, "tflops": 50.610004211796124}, {"batch": 4, "heads": 16, "kv_heads": 16, "seqlen": 2048, "head_dim": 128, "causal": true, "max_abs_err": 0.00814509391784668, "err_threshold": 0.03231103515625, "median_ms": 1.2644959688186646, "tflops": 54.34535058280975}, {"batch": 2, "heads": 16, "kv_heads": 16, "seqlen": 4096, "head_dim": 128, "causal": true, "max_abs_err": 0.007776498794555664, "err_threshold": 0.025880409240722657, "median_ms": 2.43177592754364, "tflops": 56.51793486204479}, {"batch": 1, "heads": 16, "kv_heads": 16, "seqlen": 8192, "head_dim": 128, "causal": true, "max_abs_err": 0.008241653442382812, "err_threshold": 0.03294856643676758, "median_ms": 4.7737438678741455, "tflops": 57.58120136981905}]}], "state": {"steps_done": 13, "stagnation": 2, "failure_summaries": ["step 12: ", "step 13: **Summary of variation step**\n\n**What was attempted:** No source change was generated. The final diff is empty (`no changes were made`), so this step did not actually test a new kernel or layout variant.\n\n**Why it failed:** Not a compile error, correctness failure, or performance regression. The step simply produced no candidate. With no diff, there was nothing to benchmark or commit.\n\n**Correctness / performance context:** The last baseline evaluation was valid and correct:\n- `correct: true`\n- `score: 53.788885632537735`\n- Config A: batch=8, heads=16, kv_heads=16, seqlen=1024, head_dim=128, causal=false \u2192 median 1.2478 ms (55.07 TFLOPS)\n- Config B: batch=2, heads=16, kv_heads=16, seqlen=4096, head_dim=128, causal=false \u2192 median 4.7027 ms (58.45 TFLOPS)\n\nThese numbers are the reference point for the next attempt.\n\n**Preserved artifacts:** None. The empty diff contains no design decisions, tile/layout choices, or code fragments to reuse.\n\n**What to avoid / retry differently:** Avoid repeating an empty variation. The next attempt should start from the committed baseline and make a concrete change\u2014for example:\n- Tune tile sizes or swizzle order for the two evaluated shapes.\n- Add warp"], "elapsed_s": 12367.221841499966, "input_tokens": 33349014, "output_tokens": 1202173, "workspace_dirty": false, "usd": 5.0055, "champion_profile": "ncu profile of config {'batch': 8, 'heads': 16, 'kv_heads': 16, 'seqlen': 1024, 'head_dim': 128, 'causal': False} (one launch, after warmup):\n\n## <unnamed>::attention_fwd_kernel(const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, __nv_bfloat16 *, in\n  duration                   1,250,112 ns\n  compute_sol_pct            72.05 %\n  memory_sol_pct             72.05 %\n  dram_sol_pct               13.25 %\n  achieved_occupancy_pct     31.97 %\n  theoretical_occupancy_pct  33.33 %\n  registers_per_thread       128 register/thread\n  static_smem_per_block      0 byte/block\n  dynamic_smem_per_block     17,408 byte/block\n  grid                       2,048\n  block                      128\n  waves_per_sm               6.10\n\nReading: compute_sol vs memory_sol tells you the bound (both low => latency/occupancy bound). Low achieved vs theoretical occupancy => launch config or register pressure. High registers_per_thread with spills => rebalance or reduce live state."}, "summary": {"run_dir": "runs/attention-3090-ablation10-20260808-205300", "versions": 6, "steps": 13, "seed_score": 2.3683118013635553, "best_score": 57.6949987357298, "best_version": "v0006", "tokens": 34551187, "usd": 5.0055, "elapsed_s": 12367}, "steps": [{"step": 1, "turns": 67, "evals": 5, "tools": {"list_dir": 2, "read_file": 9, "evaluate": 5, "kb_search": 18, "shell": 6, "kb_read": 9, "write_file": 3, "gpu_shell": 26, "edit_file": 11}, "kb": 27, "t0": 1786193640.591947, "t1": 1786194882.909627, "outcome": "failed", "version": null, "score": null, "reflected": false}, {"step": 2, "turns": 60, "evals": 1, "tools": {"shell": 3, "list_dir": 1, "read_file": 8, "write_file": 3, "gpu_shell": 17, "edit_file": 29, "evaluate": 1}, "kb": 0, "t0": 1786194922.919017, "t1": 1786195790.053806, "outcome": "failed", "version": null, "score": null, "reflected": false}, {"step": 3, "turns": 60, "evals": 4, "tools": {"shell": 2, "list_dir": 1, "read_file": 2, "edit_file": 7, "evaluate": 4, "gpu_shell": 44}, "kb": 0, "t0": 1786195991.829997, "t1": 1786197219.143394, "outcome": "failed", "version": null, "score": null, "reflected": true}, {"step": 4, "turns": 60, "evals": 0, "tools": {"shell": 6, "list_dir": 1, "read_file": 7, "gpu_shell": 17, "write_file": 4, "edit_file": 27}, "kb": 0, "t0": 1786197288.9405801, "t1": 1786197823.699875, "outcome": "failed", "version": null, "score": null, "reflected": false}, {"step": 5, "turns": 39, "evals": 3, "tools": {"shell": 5, "read_file": 7, "gpu_shell": 14, "edit_file": 13, "evaluate": 2, "submit": 1}, "kb": 0, "t0": 1786198044.36324, "t1": 1786198837.855967, "outcome": "committed", "version": "v0001", "score": 32.76671187658402, "reflected": true}, {"step": 6, "turns": 27, "evals": 3, "tools": {"read_file": 5, "edit_file": 10, "evaluate": 2, "shell": 3, "profile": 1, "kb_search": 10, "kb_read": 5, "submit": 1}, "kb": 15, "t0": 1786198841.368468, "t1": 1786199454.184855, "outcome": "committed", "version": "v0002", "score": 45.77794173722182, "reflected": false}, {"step": 7, "turns": 16, "evals": 3, "tools": {"list_dir": 1, "read_file": 2, "shell": 2, "kb_search": 5, "evaluate": 2, "edit_file": 3, "gpu_shell": 4, "profile": 1, "submit": 1}, "kb": 5, "t0": 1786199454.197294, "t1": 1786199890.263722, "outcome": "committed", "version": "v0003", "score": 51.32343924692174, "reflected": false}, {"step": 8, "turns": 45, "evals": 4, "tools": {"list_dir": 1, "read_file": 2, "kb_search": 13, "kb_read": 2, "shell": 3, "edit_file": 15, "gpu_shell": 11, "evaluate": 3, "profile": 1, "submit": 1}, "kb": 15, "t0": 1786199890.27569, "t1": 1786200751.922577, "outcome": "committed", "version": "v0004", "score": 53.76062054871438, "reflected": false}, {"step": 9, "turns": 60, "evals": 3, "tools": {"list_dir": 2, "read_file": 6, "profile": 2, "kb_search": 9, "kb_read": 1, "shell": 4, "edit_file": 12, "evaluate": 3, "gpu_shell": 25}, "kb": 10, "t0": 1786200755.1763651, "t1": 1786201806.374366, "outcome": "failed", "version": null, "score": null, "reflected": false}, {"step": 10, "turns": 46, "evals": 10, "tools": {"shell": 16, "list_dir": 1, "read_file": 2, "evaluate": 9, "gpu_shell": 16, "profile": 1, "edit_file": 1, "submit": 1}, "kb": 0, "t0": 1786201924.077176, "t1": 1786202677.133284, "outcome": "committed", "version": "v0005", "score": 57.33134114476901, "reflected": false}, {"step": 11, "turns": 50, "evals": 6, "tools": {"list_dir": 1, "read_file": 2, "shell": 3, "kb_search": 6, "evaluate": 5, "gpu_shell": 28, "edit_file": 9, "revert": 3, "write_file": 1, "submit": 1}, "kb": 6, "t0": 1786202680.412286, "t1": 1786204197.7204502, "outcome": "committed", "version": "v0006", "score": 57.6949987357298, "reflected": false}, {"step": 12, "turns": 60, "evals": 2, "tools": {"list_dir": 1, "read_file": 10, "evaluate": 2, "profile": 1, "kb_search": 2, "edit_file": 20, "gpu_shell": 21, "shell": 1, "write_file": 5}, "kb": 2, "t0": 1786204200.9757318, "t1": 1786205476.584409, "outcome": "failed", "version": null, "score": null, "reflected": false}, {"step": 13, "turns": 35, "evals": 2, "tools": {"shell": 6, "list_dir": 1, "read_file": 6, "edit_file": 4, "gpu_shell": 7, "evaluate": 2, "kb_search": 11, "kb_read": 2, "revert": 1}, "kb": 13, "t0": 1786205603.1120121, "t1": 1786206217.0265758, "outcome": "failed", "version": null, "score": null, "reflected": false}], "supervisor": [{"ts": 1786195991.828058, "reason": "2 consecutive steps without a commit", "guidance": "## Diagnosis\n\nThe stall is caused by a false assumption in the kernel: **the `wmma::m16n16k16` accumulator layout does NOT equal the `matrix_a` layout**. For an fp32 accumulator, a thread\u2019s 8 elements map to rows `lane/4`, `lane/4+8` with column pairs `2*(lane%4)+{0,1}` and `+8` offset. For `matrix_a` (row-major bf16), the same thread owns columns `lane%4 + {0,4,8,12}`. Feeding `s_frag` \u2192 `p_frag` directly places every P element at the wrong (row,col), so the PV matmul mixes unrelated columns \u2014 exactly the observed ~1.2-1.8 abs error. The online-softmax `m_prev[2]`/`warp_max4` logic is row-group-correct and is *not* the primary defect.\n\n## Directions\n\n1. **Stage P through shared memory (canonical FA2).** Write the softmaxed fp32 scores to a P smem tile using each thread\u2019s true accumulator (row,col), `__syncthreads()`, then `wmma::load_matrix_sync` as `matrix_a` for the PV matmul.  \n   *Mechanism:* removes the invalid layout shortcut.  \n   *Expected gain:* correctness restored; keeps tensor-core throughput.  \n   *Risk:* extra smem traffic/barrier, modest slowdown vs the broken register path.\n\n2. **Remap accumulator\u2192matrix_a with warp shuffles.** Use `__shfl_sync` to redistribute the 8 elements so each thread ends up with the correct matrix_a column group, avoiding smem.  \n   *Mechanism:* register-only transpose of fragment layout.  \n   *Expected gain:* avoids smem round-trip; slightly faster than #1.  \n   *Risk:* high complexity, fragile lane mappings \u2014 only attempt after #1 proves the fix.\n\n3. **Finish the diagnostic `s_dump_kernel`.** Dump raw S for warp 0 and diff against CPU reference.  \n   *Mechanism:* isolates QK vs PV vs softmax errors.  \n   *Expected gain:* minutes-to-debug iteration instead of blind rewrites.  \n   *Risk:* minimal.\n\n4. **Switch to `mma.sync.m16n8k16` with explicit fragment handling.** This shape has well-documented layouts and avoids the misleading 16\u00d716\u00d716 shortcut.  \n   *Mechanism:* direct PTX mma + smem P staging.  \n   *Expected gain:* same performance, lower correctness risk.  \n   *Risk:* medium implementation effort.\n\n5. **Roll back to v0000 and apply micro-optimizations.** Incremental changes (padded smem, vectorized loads) avoid large, correctness-failing rewrites.  \n   *Mechanism:* small-step evolutionary search.  \n   *Expected gain:* monotonic progress.  \n   *Risk:* slower asymptotic performance.\n\n## Top recommendation\n\n**Direction #1** \u2014 stage P through shared memory. It directly fixes the proven root cause with minimal new risk; pursue #2/#4 only after it passes."}, {"ts": 1786198044.360953, "reason": "4 consecutive steps without a commit", "guidance": "**Diagnosis.** The search has stalled because every generation is a full-kernel rewrite that couples five fragile subsystems at once \u2014 wmma fragment-layout mapping, per-lane online-softmax, cp.async double-buffering, smem reuse, and GQA. A failure returns only one scalar (`max_abs_err`), so a 0.7\u20131.2 error could mean any of those subsystems is wrong; the search cannot localize, and step 4 additionally burned a generation on an uncompiled diff.\n\n**Directions**\n1. **Instrumented micro-validation (debug harness).** Add `dbgS/dbgP/dbgL/dbgM` outputs to `probe_full.cu` for one warp, one head, S=64 non-causal; compare tile-by-tile against the CPU reference and report the first row/tile where S, P, l, or O diverges. Mechanism: minimal debug-only code. Gain: converts one opaque scalar into a localizable signal. Risk: none, except minor kernel clutter.\n2. **Two-pass softmax checkpoint.** Temporarily replace online rescaling with full-S-in-smem softmax (compute all 4 S tiles, block-softmax, then PV). Gain: validates the wmma/smem data path while eliminating the most error-prone rescale logic; once green, reintroduce online softmax. Risk: not FlashAttention asymptotically; only a waypoint.\n3. **Mask padded keys, not just zero-fill them.** `load_tile` zero-fills OOB K/V rows; for `seq_len % BLOCK_N != 0`, zero rows produce logit 0 and inflate `l`, corrupting the output. Fix by writing `-INF`-equivalent scores or a per-tile valid count. Gain: robustness on non-multiple seq_lens (current probe tests only multiples of 64, hiding this). Risk: low; not the reported S=1024 failure, but a latent correctness bug.\n4. **Switch to explicit `mma.sync.aligned.m16n8k16` with manual fragment maps.** Replace `wmma` with PTX mma and explicit accumulator\u2194A replay layouts. Gain: removes `wmma` layout ambiguity \u2014 the most suspicious residual bug class \u2014 and enables per-fragment debug. Risk: verbose and easy to get wrong; do only after #1.\n5. **Post-correctness performance: BLOCK_M=128, BLOCK_N=64, 8 warps, 3-stage K/V pipeline.** Larger tiles and deeper pipelining give the real speedup. Risk: large rewrite; only after all probe configs are green.\n\n**Top recommendation:** #1 \u2014 instrument first. The harness pays for itself immediately because #2\u2013#4 all depend on knowing whether the error lives in QK^T, the softmax state, PV, or the epilogue."}], "baselines": {"sdpa_flash": 70.395, "sdpa_cudnn": 62.97, "sdpa_efficient": 47.647, "sdpa_math": 5.869}, "baselines_per_config": {"sdpa_flash": {"s1024_b8_full": 66.709, "s2048_b4_full": 67.787, "s4096_b2_full": 68.304, "s8192_b1_full": 74.484, "s1024_b8_causal": 67.193, "s2048_b4_causal": 71.149, "s4096_b2_causal": 73.27, "s8192_b1_causal": 74.827}, "sdpa_cudnn": {"s1024_b8_full": 64.777, "s2048_b4_full": 66.779, "s4096_b2_full": 67.693, "s8192_b1_full": 68.222, "s1024_b8_causal": 52.511, "s2048_b4_causal": 58.864, "s4096_b2_causal": 62.123, "s8192_b1_causal": 64.442}, "sdpa_efficient": {"s1024_b8_full": 45.642, "s2048_b4_full": 47.869, "s4096_b2_full": 50.396, "s8192_b1_full": 50.995, "s1024_b8_causal": 42.636, "s2048_b4_causal": 46.223, "s4096_b2_causal": 48.332, "s8192_b1_causal": 49.664}, "sdpa_math": {"s1024_b8_full": 8.665, "s2048_b4_full": 9.367, "s4096_b2_full": 9.64, "s1024_b8_causal": 3.603, "s2048_b4_causal": 3.783, "s4096_b2_causal": 3.834}}, "budgets": {"max_versions": 12, "max_steps": 40, "max_wall_clock_s": 86400, "max_turns_per_step": 60, "max_evals_per_step": 12, "max_usd": 5.0, "max_total_tokens": 60000000}, "model": "deepseek-v4-flash"};
+const $ = s => document.querySelector(s);
+const el = (t, a = {}, txt) => { const n = document.createElementNS(
+  t === "svg" || a._svg ? "http://www.w3.org/2000/svg" : "http://www.w3.org/1999/xhtml", t);
+  delete a._svg; for (const k in a) n.setAttribute(k, a[k]);
+  if (txt != null) n.textContent = txt; return n; };
+const fmt = (x, d = 2) => x == null ? "–" : (+x).toLocaleString("en", {maximumFractionDigits: d});
+const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+
+/* theme toggle: auto -> light -> dark */
+{ const order = ["", "light", "dark"]; let i = 0;
+  $("#theme").onclick = () => { i = (i + 1) % 3;
+    if (order[i]) document.documentElement.setAttribute("data-theme", order[i]);
+    else document.documentElement.removeAttribute("data-theme");
+    draw(); }; }
+
+/* tooltip */
+const tip = $("#tip");
+const showTip = (ev, html_) => { tip.innerHTML = html_; tip.style.opacity = 1;
+  const pad = 14, w = tip.offsetWidth;
+  tip.style.left = Math.min(ev.clientX + pad, innerWidth - w - 8) + "px";
+  tip.style.top = (ev.clientY + pad) + "px"; };
+const hideTip = () => tip.style.opacity = 0;
+
+const lin = D.lineage, seed = lin[0], best = lin.reduce((a, b) => b.score > a.score ? b : a, lin[0] || {score: 0});
+const bl = Object.entries(D.baselines || {}).sort((a, b) => b[1] - a[1]);
+const bestBl = bl.length ? bl[0] : null;
+let logScale = false;
+$("#logscale").onclick = () => { logScale = !logScale; draw(); };
+
+function tiles() {
+  const t = $("#tiles"); t.innerHTML = "";
+  const spend = D.state.usd ?? D.summary.usd;
+  const toks = (D.state.input_tokens ?? 0) + (D.state.output_tokens ?? 0);
+  const items = [
+    ["best score", fmt(best?.score) + " TF",
+     seed && best ? "+" + fmt((best.score / seed.score - 1) * 100, 1) + "% vs seed" : "", true],
+    ["versions", lin.length ? lin.length - 1 : 0, "of " + (D.budgets.max_versions ?? "?") + " max"],
+    ["steps", D.state.steps_done ?? 0, (D.state.stagnation ?? 0) + " stagnating"],
+    ["spend", "$" + fmt(spend, 2), fmt(toks / 1e6, 2) + "M tokens · " + (D.model || "")],
+    bestBl ? ["vs " + bestBl[0], fmt(best?.score / bestBl[1] * 100, 1) + "%",
+              "baseline " + fmt(bestBl[1], 1) + " TF"] : null,
+  ].filter(Boolean);
+  for (const [k, v, d, up] of items) {
+    const c = el("div", {class: "tile"});
+    c.append(el("div", {class: "k"}, k), el("div", {class: "v"}, String(v)));
+    if (d) c.append(el("div", {class: "d" + (up ? " up" : "")}, d));
+    t.append(c);
+  }
+}
+
+function mainChart() {
+  const host = $("#mainchart"); host.innerHTML = "";
+  if (!lin.length) { host.textContent = "no committed versions yet"; return; }
+  const W = 1120, H = 320, L = 52, R = 120, T = 14, B = 34;
+  const xs = lin.map((_, i) => i);
+  const maxY = Math.max(...lin.map(e => e.score), ...(bl.map(b => b[1])), 1) * 1.08;
+  const minY = logScale ? Math.max(0.5, Math.min(...lin.map(e => e.score)) * 0.8) : 0;
+  const sx = i => L + (xs.length === 1 ? (W - L - R) / 2 : i * (W - L - R) / (xs.length - 1));
+  const sy = v => { if (logScale) { const a = Math.log10(minY), b = Math.log10(maxY);
+      return T + (H - T - B) * (1 - (Math.log10(Math.max(v, minY)) - a) / (b - a)); }
+    return T + (H - T - B) * (1 - (v - minY) / (maxY - minY)); };
+  const svg = el("svg", {viewBox: `0 0 ${W} ${H}`, _svg: 1});
+  const ticks = logScale ? [1, 2, 5, 10, 20, 50, 100].filter(v => v >= minY && v <= maxY)
+    : Array.from({length: 5}, (_, i) => minY + (maxY - minY) * i / 4);
+  for (const v of ticks) {
+    svg.append(el("line", {x1: L, x2: W - R, y1: sy(v), y2: sy(v),
+      stroke: css("--grid"), "stroke-width": 1, _svg: 1}));
+    svg.append(el("text", {x: L - 8, y: sy(v) + 4, "text-anchor": "end", _svg: 1}, fmt(v, v < 10 ? 1 : 0)));
+  }
+  svg.append(el("line", {x1: L, x2: W - R, y1: sy(minY), y2: sy(minY), stroke: css("--axis"), _svg: 1}));
+  for (const [name, v] of bl) {
+    svg.append(el("line", {x1: L, x2: W - R, y1: sy(v), y2: sy(v), stroke: css("--muted"),
+      "stroke-dasharray": "5 4", "stroke-width": 1.2, opacity: .75, _svg: 1}));
+    svg.append(el("text", {x: W - R + 6, y: sy(v) + 4, _svg: 1}, `${name} ${fmt(v, 1)}`));
+  }
+  const path = lin.map((e, i) => (i ? "L" : "M") + sx(i) + " " + sy(e.score)).join(" ");
+  svg.append(el("path", {d: path, fill: "none", stroke: css("--s1"), "stroke-width": 2,
+    "stroke-linejoin": "round", _svg: 1}));
+  lin.forEach((e, i) => {
+    svg.append(el("circle", {cx: sx(i), cy: sy(e.score), r: 4.5, fill: css("--s1"),
+      stroke: css("--surface"), "stroke-width": 2, _svg: 1}));
+    svg.append(el("text", {x: sx(i), y: H - B + 16, "text-anchor": "middle", _svg: 1}, e.version));
+  });
+  const last = lin[lin.length - 1];
+  svg.append(el("text", {x: sx(lin.length - 1), y: sy(last.score) - 10,
+    "text-anchor": "middle", fill: css("--ink"), "font-weight": 600, _svg: 1}, fmt(last.score)));
+  const overlay = el("rect", {x: L, y: T, width: W - L - R, height: H - T - B,
+    fill: "transparent", _svg: 1});
+  overlay.addEventListener("mousemove", ev => {
+    const bb = svg.getBoundingClientRect();
+    const px = (ev.clientX - bb.left) * W / bb.width;
+    let bi = 0, bd = 1e9;
+    lin.forEach((_, i) => { const d = Math.abs(sx(i) - px); if (d < bd) { bd = d; bi = i; } });
+    const e = lin[bi];
+    showTip(ev, `<b>${e.version}</b> · step ${e.step} · ${fmt(e.score)} TFLOPS` +
+      (seed && e !== seed ? ` <span class="t">(+${fmt((e.score / seed.score - 1) * 100, 1)}% vs seed)</span>` : "") +
+      `<div class="t">${(e.message || "").split("\n")[0].slice(0, 120)}</div>`);
+  });
+  overlay.addEventListener("mouseleave", hideTip);
+  svg.append(overlay);
+  host.append(svg);
+}
+
+function cfgChart() {
+  const host = $("#cfgchart"); host.innerHTML = ""; $("#cfglegend").innerHTML = "";
+  const latest = [...lin].reverse().find(e => (e.configs || []).length);
+  if (!latest) { host.textContent = "no per-config data yet"; return; }
+  const cfgs = latest.configs;
+  const blPer = bestBl ? (D.baselines_per_config[bestBl[0]] || {}) : {};
+  const key = c => `s${c.seqlen}_b${c.batch}_${c.causal ? "causal" : "full"}`;
+  const label = c => `${c.seqlen / 1024}k${c.causal ? " ⧄" : ""}`;
+  const W = 560, H = 260, L = 46, T = 12, B = 30;
+  const maxY = Math.max(...cfgs.map(c => c.tflops), ...cfgs.map(c => blPer[key(c)] || 0), 1) * 1.1;
+  const svg = el("svg", {viewBox: `0 0 ${W} ${H}`, _svg: 1});
+  const sy = v => T + (H - T - B) * (1 - v / maxY);
+  for (let i = 0; i <= 4; i++) { const v = maxY * i / 4;
+    svg.append(el("line", {x1: L, x2: W - 8, y1: sy(v), y2: sy(v), stroke: css("--grid"), _svg: 1}));
+    svg.append(el("text", {x: L - 6, y: sy(v) + 4, "text-anchor": "end", _svg: 1}, fmt(v, 0)));
+  }
+  const groupW = (W - L - 8) / cfgs.length, barW = Math.min(26, groupW / 2 - 4);
+  cfgs.forEach((c, i) => {
+    const x0 = L + i * groupW + groupW / 2;
+    const bars = [[css("--s1"), c.tflops, "kernel " + latest.version],
+                  [css("--s2"), blPer[key(c)], bestBl ? bestBl[0] : "baseline"]];
+    bars.forEach(([color, v, name], j) => {
+      if (v == null) return;
+      const x = x0 + (j - 1) * barW + (j ? 2 : -2);
+      const r = el("path", {d: `M${x} ${sy(0)} V${sy(v) + 4} Q${x} ${sy(v)} ${x + 4} ${sy(v)}` +
+        ` H${x + barW - 4} Q${x + barW} ${sy(v)} ${x + barW} ${sy(v) + 4} V${sy(0)} Z`,
+        fill: color, _svg: 1});
+      r.addEventListener("mousemove", ev => showTip(ev,
+        `<b>${label(c)} ${c.causal ? "causal" : "full"}</b> B=${c.batch}<br>${name}: ${fmt(v)} TFLOPS`));
+      r.addEventListener("mouseleave", hideTip);
+      svg.append(r);
+      if (!j) svg.append(el("text", {x: x + barW / 2, y: sy(v) - 5,
+        "text-anchor": "middle", fill: css("--ink"), _svg: 1}, fmt(v, 1)));
+    });
+    svg.append(el("text", {x: x0, y: H - B + 16, "text-anchor": "middle", _svg: 1}, label(c)));
+  });
+  host.append(svg);
+  const lg = $("#cfglegend");
+  [[css("--s1"), "kernel " + latest.version], [css("--s2"), bestBl ? bestBl[0] : "baseline"]]
+    .forEach(([c, n]) => { const s = el("span");
+      s.append(el("span", {class: "sw", style: `background:${c}`}), n); lg.append(s); });
+}
+
+function stepsRow() {
+  const host = $("#steps"); host.innerHTML = "";
+  for (const s of D.steps) {
+    const b = el("div", {class: "stepbx " + s.outcome}, s.outcome === "committed" ? "✓" : s.step);
+    if (s.reflected) b.append(el("span", {class: "zap"}, "⚡"));
+    b.addEventListener("mousemove", ev => showTip(ev,
+      `<b>step ${s.step}</b> · ${s.outcome}${s.version ? " → " + s.version + " (" + fmt(s.score) + ")" : ""}` +
+      `<div class="t">${s.turns} turns · ${s.evals} evals · ${s.kb} kb lookups` +
+      (s.reflected ? " · supervisor guided" : "") + "</div>"));
+    b.addEventListener("mouseleave", hideTip);
+    host.append(b);
+  }
+  const sup = $("#sup"); sup.innerHTML = "";
+  if (!D.supervisor.length) sup.textContent = "none yet";
+  for (const r of D.supervisor) {
+    const d = el("div", {style: "margin-bottom:8px"});
+    d.append(el("div", {style: "color:var(--muted);font-size:11px"}, "⚡ " + r.reason));
+    d.append(el("div", {}, (r.guidance || "").split("\n")[0].slice(0, 180) + "…"));
+    sup.append(d);
+  }
+}
+
+function table() {
+  const tb = $("#lin tbody"); tb.innerHTML = "";
+  for (const e of [...lin].reverse()) {
+    const tr = el("tr");
+    const dlt = seed && e.version !== "v0000"
+      ? "+" + fmt((e.score / seed.score - 1) * 100, 1) + "%" : "";
+    tr.append(el("td", {}, e.version), el("td", {}, String(e.step)),
+      el("td", {class: "num"}, fmt(e.score)),
+      Object.assign(el("td", {class: "num"}), {innerHTML: dlt ? `<span class="delta">${dlt}</span>` : "–"}),
+      el("td", {}, (e.message || "").split("\n")[0].slice(0, 110)));
+    tb.append(tr);
+  }
+}
+
+function draw() {
+  $("#runname").textContent = D.run;
+  const st = $("#status");
+  st.textContent = D.running ? "running" : "finished";
+  st.className = "pill" + (D.running ? " live" : "");
+  tiles(); mainChart(); cfgChart(); stepsRow(); table();
+  $("#foot").textContent = `generated ${D.generated_at}` +
+    (D.running ? " · auto-refreshes while `avo dashboard --watch` is running" : "") +
+    ` · ${D.state.elapsed_s ? fmt(D.state.elapsed_s / 3600, 1) + "h elapsed" : ""}`;
+}
+draw();
+</script>
+</body>
+</html>

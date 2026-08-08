@@ -1,0 +1,11 @@
+{
+ "run_dir": "runs/attention-3090-ablation10-20260808-205300",
+ "versions": 6,
+ "steps": 13,
+ "seed_score": 2.3683118013635553,
+ "best_score": 57.6949987357298,
+ "best_version": "v0006",
+ "tokens": 34551187,
+ "usd": 5.0055,
+ "elapsed_s": 12367
+}

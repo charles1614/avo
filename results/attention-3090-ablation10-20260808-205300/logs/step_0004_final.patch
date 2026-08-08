@@ -1,0 +1,1121 @@
+diff --git a/attention.cu b/attention.cu
+index 3727658..e7dd092 100644
+--- a/attention.cu
++++ b/attention.cu
+@@ -1,130 +1,280 @@
+-// Seed attention forward kernel: FlashAttention-style online softmax, but
+-// deliberately scalar — no tensor cores, no cp.async, no arch-specific
+-// intrinsics — so it compiles for both sm_86 and sm_90a and leaves large
+-// optimization headroom. BF16 in/out, FP32 accumulation.
+-//
+-// Work partitioning: one block per (query tile, batch*head). 4 warps per
+-// block; each warp owns ROWS_PER_WARP query rows; within a row the 32 lanes
+-// cover the head dimension with D_PER_LANE consecutive elements each.
+-
++// FlashAttention-2-style BF16 forward kernel for sm_86 (RTX 3090 Ti).
++// - wmma 16x16x16 tensor-core matmuls (mma.sync.m16n8k16 under the hood)
++// - cp.async double-buffered K/V tiles; padded row stride (136 bf16) makes
++//   ldmatrix reads conflict-free
++// - online softmax; softmaxed scores are staged as bf16 through a small
++//   per-warp shared tile (true row/col layout) before the PV matmul, because
++//   the m16n16k16 accumulator layout differs from the matrix_a layout.
+ #include <torch/extension.h>
+ #include <ATen/cuda/CUDAContext.h>
+ #include <c10/cuda/CUDAGuard.h>
+ #include <cuda_bf16.h>
++#include <mma.h>
+ #include <math.h>
+ 
+ namespace {
+ 
+-constexpr int BLOCK_M = 32;   // query rows per block
+-constexpr int BLOCK_N = 64;   // key/value rows per tile
++using namespace nvcuda;
++
++constexpr int BLOCK_M = 64;    // query rows per block
++constexpr int BLOCK_N = 64;    // kv rows per tile
+ constexpr int HEAD_DIM = 128;
+ constexpr int NUM_WARPS = 4;
+ constexpr int NUM_THREADS = NUM_WARPS * 32;
+-constexpr int ROWS_PER_WARP = BLOCK_M / NUM_WARPS;  // 8
+-constexpr int D_PER_LANE = HEAD_DIM / 32;           // 4
++constexpr int PADDED_D = HEAD_DIM + 8;        // 16 B/row padding
++constexpr int P_COLS = BLOCK_N + 8;           // P tile cols (72) -> conflict-free bf16 smem writes
++constexpr int TILE_ELEMS = BLOCK_N * PADDED_D;  // per K or V tile (bf16)
++constexpr int O_ELEMS = BLOCK_M * PADDED_D;     // O staging (reuses Q buffer)
++constexpr int P_SMEM = NUM_WARPS * 16 * P_COLS * 2;  // bf16 P staging for PV (9,216 B)
++constexpr int SMEM_BYTES = 4 * TILE_ELEMS * 2 + O_ELEMS * 2 + P_SMEM;  // 96,256 B
++
++__device__ __forceinline__ void cp_async16(void* smem, const void* gmem) {
++    uint32_t s = static_cast<uint32_t>(__cvta_generic_to_shared(smem));
++    asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" :: "r"(s), "l"(gmem));
++}
++__device__ __forceinline__ void cp_async_commit() {
++    asm volatile("cp.async.commit_group;\n");
++}
++template<int N>
++__device__ __forceinline__ void cp_async_wait() {
++    asm volatile("cp.async.wait_group %0;\n" :: "n"(N));
++}
++
++// Copy a BLOCK_N x HEAD_DIM tile from gmem (rows kv0..) to padded shared,
++// zero-filling rows past seq_len. Also used to stage Q (kv0 = query row base).
++__device__ __forceinline__ void load_tile(
++    const __nv_bfloat16* __restrict__ src, __nv_bfloat16* __restrict__ dst,
++    int row0, int seq_len)
++{
++    constexpr int CHUNKS = BLOCK_N * HEAD_DIM / 8;  // 16B chunks
++#pragma unroll
++    for (int i = threadIdx.x; i < CHUNKS; i += NUM_THREADS) {
++        const int row = i / (HEAD_DIM / 8);
++        const int col8 = i % (HEAD_DIM / 8);
++        const int grow = row0 + row;
++        __nv_bfloat16* s = dst + row * PADDED_D + col8 * 8;
++        if (grow < seq_len) {
++            cp_async16(s, src + (long long)grow * HEAD_DIM + col8 * 8);
++        } else {
++            *reinterpret_cast<uint4*>(s) = make_uint4(0, 0, 0, 0);
++        }
++    }
++}
+ 
+-__device__ __forceinline__ float warp_sum(float v) {
++__device__ __forceinline__ float warp_max4(float v) {
++#pragma unroll
++    for (int off = 1; off < 4; off <<= 1)
++        v = fmaxf(v, __shfl_xor_sync(0xffffffffu, v, off));
++    return v;
++}
++__device__ __forceinline__ float warp_sum4(float v) {
+ #pragma unroll
+-    for (int offset = 16; offset > 0; offset >>= 1)
+-        v += __shfl_xor_sync(0xffffffffu, v, offset);
++    for (int off = 1; off < 4; off <<= 1)
++        v += __shfl_xor_sync(0xffffffffu, v, off);
+     return v;
+ }
+ 
+-__global__ void attention_fwd_kernel(
+-    const __nv_bfloat16* __restrict__ q,
+-    const __nv_bfloat16* __restrict__ k,
+-    const __nv_bfloat16* __restrict__ v,
+-    __nv_bfloat16* __restrict__ out,
+-    int seq_len, float scale, bool causal)
++__global__ void __launch_bounds__(NUM_THREADS, 1)
++attention_fwd_kernel(const __nv_bfloat16* __restrict__ q,
++                     const __nv_bfloat16* __restrict__ k,
++                     const __nv_bfloat16* __restrict__ v,
++                     __nv_bfloat16* __restrict__ out,
++                     int seq_len, float scale, bool causal,
++                     int num_heads, int kv_heads)
+ {
++    extern __shared__ char smem[];
++    __nv_bfloat16* sK0 = reinterpret_cast<__nv_bfloat16*>(smem);
++    __nv_bfloat16* sV0 = sK0 + TILE_ELEMS;
++    __nv_bfloat16* sK1 = sV0 + TILE_ELEMS;
++    __nv_bfloat16* sV1 = sK1 + TILE_ELEMS;
++    __nv_bfloat16* sP = sV1 + TILE_ELEMS;      // bf16 P staging for PV matmul
++    __nv_bfloat16* sQO = sP + NUM_WARPS * 16 * P_COLS;  // Q staging; reused for O staging
++
+     const int m_tile = blockIdx.x;
+-    const long long bh = blockIdx.y;  // fused batch*head index
++    const int bh = blockIdx.y;
++    const int b = bh / num_heads;
++    const int h = bh % num_heads;
++    const int h_per_kv = num_heads / kv_heads;
++    const int kvh = h_per_kv > 1 ? h / h_per_kv : h;
++    const long long qbase = (long long)bh * seq_len * HEAD_DIM;
++    const long long kvbase = ((long long)(b * kv_heads + kvh)) * seq_len * HEAD_DIM;
++
+     const int warp = threadIdx.x / 32;
+     const int lane = threadIdx.x % 32;
+-    const int d0 = lane * D_PER_LANE;
++    const int m0 = m_tile * BLOCK_M + warp * 16;  // first global row of this warp
++    const int m0b = m_tile * BLOCK_M;             // first global row of the block
+ 
+-    const long long base = bh * (long long)seq_len * HEAD_DIM;
++    // Stage Q into shared (zero-fill OOB rows), then pull into register fragments.
++    load_tile(q + qbase, sQO, m0b, seq_len);
++    cp_async_commit();
++    cp_async_wait<0>();
++    __syncthreads();
+ 
+-    __shared__ __nv_bfloat16 sK[BLOCK_N][HEAD_DIM];
+-    __shared__ __nv_bfloat16 sV[BLOCK_N][HEAD_DIM];
++    wmma::fragment<wmma::matrix_a, 16, 16, 16, __nv_bfloat16, wmma::row_major> q_frag[8];
++#pragma unroll
++    for (int kt = 0; kt < 8; ++kt)
++        wmma::load_matrix_sync(q_frag[kt], sQO + warp * 16 * PADDED_D + kt * 16, PADDED_D);
+ 
+-    float q_reg[ROWS_PER_WARP][D_PER_LANE];
+-    float acc[ROWS_PER_WARP][D_PER_LANE];
+-    float row_max[ROWS_PER_WARP];
+-    float row_sum[ROWS_PER_WARP];
++    wmma::fragment<wmma::accumulator, 16, 16, 16, float> s_frag[4];
++    wmma::fragment<wmma::accumulator, 16, 16, 16, float> o_frag[8];
++    wmma::fragment<wmma::matrix_b, 16, 16, 16, __nv_bfloat16, wmma::col_major> k_frag;
++    wmma::fragment<wmma::matrix_b, 16, 16, 16, __nv_bfloat16, wmma::row_major> v_frag;
+ 
+ #pragma unroll
+-    for (int r = 0; r < ROWS_PER_WARP; ++r) {
+-        row_max[r] = -INFINITY;
+-        row_sum[r] = 0.f;
+-        const int grow = m_tile * BLOCK_M + warp * ROWS_PER_WARP + r;
+-#pragma unroll
+-        for (int j = 0; j < D_PER_LANE; ++j) {
+-            acc[r][j] = 0.f;
+-            q_reg[r][j] = (grow < seq_len)
+-                ? __bfloat162float(q[base + (long long)grow * HEAD_DIM + d0 + j])
+-                : 0.f;
+-        }
++    for (int i = 0; i < 8; ++i) wmma::fill_fragment(o_frag[i], 0.f);
++
++    float m_prev[2] = {-INFINITY, -INFINITY};
++    float l_prev[2] = {0.f, 0.f};
++
++    const int n_tiles_total = (seq_len + BLOCK_N - 1) / BLOCK_N;
++    const int n_tiles_block =
++        causal ? min(n_tiles_total, (m0b + BLOCK_M - 1) / BLOCK_N + 1) : n_tiles_total;
++
++    if (n_tiles_block > 0) {
++        load_tile(k + kvbase, sK0, 0, seq_len);
++        load_tile(v + kvbase, sV0, 0, seq_len);
++        cp_async_commit();
+     }
+ 
+-    const int row_hi = min(m_tile * BLOCK_M + BLOCK_M - 1, seq_len - 1);
+-    int n_tiles = (seq_len + BLOCK_N - 1) / BLOCK_N;
+-    if (causal) n_tiles = min(n_tiles, row_hi / BLOCK_N + 1);
+-
+-    for (int nt = 0; nt < n_tiles; ++nt) {
+-        // Cooperative K/V tile load into shared memory.
+-        for (int idx = threadIdx.x; idx < BLOCK_N * HEAD_DIM; idx += NUM_THREADS) {
+-            const int row = idx / HEAD_DIM;
+-            const int col = idx % HEAD_DIM;
+-            const int grow_kv = nt * BLOCK_N + row;
+-            if (grow_kv < seq_len) {
+-                sK[row][col] = k[base + (long long)grow_kv * HEAD_DIM + col];
+-                sV[row][col] = v[base + (long long)grow_kv * HEAD_DIM + col];
+-            } else {
+-                sK[row][col] = __float2bfloat16(0.f);
+-                sV[row][col] = __float2bfloat16(0.f);
+-            }
++    for (int nt = 0; nt < n_tiles_block; ++nt) {
++        const int buf = nt & 1;
++        __nv_bfloat16* sK = buf ? sK1 : sK0;
++        __nv_bfloat16* sV = buf ? sV1 : sV0;
++        if (nt + 1 < n_tiles_block) {
++            load_tile(k + kvbase, buf ? sK0 : sK1, (nt + 1) * BLOCK_N, seq_len);
++            load_tile(v + kvbase, buf ? sV0 : sV1, (nt + 1) * BLOCK_N, seq_len);
++            cp_async_commit();
+         }
++        if (nt + 1 < n_tiles_block) cp_async_wait<1>(); else cp_async_wait<0>();
+         __syncthreads();
+ 
+-        for (int r = 0; r < ROWS_PER_WARP; ++r) {
+-            const int grow = m_tile * BLOCK_M + warp * ROWS_PER_WARP + r;
+-            if (grow >= seq_len) continue;  // uniform across the warp
+-            for (int c = 0; c < BLOCK_N; ++c) {
+-                const int gcol = nt * BLOCK_N + c;
+-                if (gcol >= seq_len) break;          // uniform across the warp
+-                if (causal && gcol > grow) break;    // columns are ascending
+-
+-                float partial = 0.f;
+-#pragma unroll
+-                for (int j = 0; j < D_PER_LANE; ++j)
+-                    partial += q_reg[r][j] * __bfloat162float(sK[c][d0 + j]);
+-                const float s = warp_sum(partial) * scale;
+-
+-                // Online softmax at column granularity (tile size 1).
+-                const float m_new = fmaxf(row_max[r], s);
+-                const float corr = expf(row_max[r] - m_new);  // exp(-inf)=0 first col
+-                const float p = expf(s - m_new);
+-                row_sum[r] = row_sum[r] * corr + p;
+-#pragma unroll
+-                for (int j = 0; j < D_PER_LANE; ++j)
+-                    acc[r][j] = acc[r][j] * corr
+-                              + p * __bfloat162float(sV[c][d0 + j]);
+-                row_max[r] = m_new;
++        const int kv0 = nt * BLOCK_N;
++
++        // ---- QK^T: S[16x64] = Q[16x128] * K^T[128x64] (4 n-tiles x 8 k-chunks) ----
++#pragma unroll
++        for (int i = 0; i < 4; ++i) {
++            const int kvc = kv0 + 16 * i;
++            const bool full_mask = causal && (kvc > m0 + 15);
++            const bool may_mask = causal && !full_mask &&
++                                  (kvc + 15 >= m0) && (kvc <= m0 + 15);
++            __nv_bfloat16* Pw = sP + warp * (16 * P_COLS) + 16 * i;
++#pragma unroll
++            for (int j = 0; j < 8; ++j) s_frag[i].x[j] = 0.f;
++            if (full_mask) {
++                // Entire 16-col tile is masked: P tile must be all zeros.
++#pragma unroll
++                for (int j = 0; j < 8; ++j) {
++                    const int rr = ((j & 2) ? 8 : 0) + lane / 4;
++                    const int cc = 2 * (lane % 4) + (j & 1) + ((j & 4) ? 8 : 0);
++                    Pw[rr * P_COLS + cc] = __float2bfloat16(0.f);
++                }
++                continue;
++            }
++#pragma unroll
++            for (int kt = 0; kt < 8; ++kt) {
++                wmma::load_matrix_sync(k_frag, sK + (16 * i) * PADDED_D + kt * 16, PADDED_D);
++                wmma::mma_sync(s_frag[i], q_frag[kt], k_frag, s_frag[i]);
++            }
++#pragma unroll
++            for (int j = 0; j < 8; ++j) s_frag[i].x[j] *= scale;
++            if (may_mask) {
++#pragma unroll
++                for (int j = 0; j < 8; ++j) {
++                    const int rr = ((j & 2) ? 8 : 0) + lane / 4;
++                    const int cc = 2 * (lane % 4) + (j & 1) + ((j & 4) ? 8 : 0);
++                    if (kvc + cc > m0 + rr) s_frag[i].x[j] = -INFINITY;
++                }
++            }
++            // ---- online softmax for this 16-col tile ----
++            // wmma m16n16k16 accumulator layout: element j of row lane/4 sits at
++            // j in {0,1,4,5}; of row lane/4+8 at {2,3,6,7}.
++            float tm0 = fmaxf(fmaxf(s_frag[i].x[0], s_frag[i].x[1]),
++                              fmaxf(s_frag[i].x[4], s_frag[i].x[5]));
++            float tm1 = fmaxf(fmaxf(s_frag[i].x[2], s_frag[i].x[3]),
++                              fmaxf(s_frag[i].x[6], s_frag[i].x[7]));
++            tm0 = warp_max4(tm0);
++            tm1 = warp_max4(tm1);
++            const float mn0 = fmaxf(m_prev[0], tm0);
++            const float mn1 = fmaxf(m_prev[1], tm1);
++            const float corr0 = __expf(m_prev[0] - mn0);
++            const float corr1 = __expf(m_prev[1] - mn1);
++#pragma unroll
++            for (int o = 0; o < 8; ++o) {
++#pragma unroll
++                for (int j = 0; j < 8; ++j)
++                    o_frag[o].x[j] *= ((j & 2) ? corr1 : corr0);
++            }
++            float ps0 = 0.f, ps1 = 0.f;
++#pragma unroll
++            for (int j = 0; j < 8; ++j) {
++                const float p = __expf(s_frag[i].x[j] - ((j & 2) ? mn1 : mn0));
++                s_frag[i].x[j] = p;
++                if (j & 2) ps1 += p; else ps0 += p;
++            }
++            ps0 = warp_sum4(ps0);
++            ps1 = warp_sum4(ps1);
++            l_prev[0] = l_prev[0] * corr0 + ps0;
++            l_prev[1] = l_prev[1] * corr1 + ps1;
++            m_prev[0] = mn0;
++            m_prev[1] = mn1;
++            // Stage P (bf16) through shared memory using true (row, col) layout;
++            // the accumulator layout does NOT equal the matrix_a layout.
++#pragma unroll
++            for (int j = 0; j < 8; ++j) {
++                const int rr = ((j & 2) ? 8 : 0) + lane / 4;
++                const int cc = 2 * (lane % 4) + (j & 1) + ((j & 4) ? 8 : 0);
++                Pw[rr * P_COLS + cc] = __float2bfloat16(s_frag[i].x[j]);
++            }
++        }
++        __syncthreads();  // P staging done before PV reads it
++
++        // ---- PV: O[16x128] += P[16x64] * V[64x128] (8 n-tiles x 4 k-chunks) ----
++        wmma::fragment<wmma::matrix_a, 16, 16, 16, __nv_bfloat16, wmma::row_major> p_frag[4];
++#pragma unroll
++        for (int kc = 0; kc < 4; ++kc)
++            wmma::load_matrix_sync(p_frag[kc], sP + warp * (16 * P_COLS) + 16 * kc, P_COLS);
++#pragma unroll
++        for (int ot8 = 0; ot8 < 8; ++ot8) {
++#pragma unroll
++            for (int kc = 0; kc < 4; ++kc) {
++                wmma::load_matrix_sync(v_frag, sV + (16 * kc) * PADDED_D + ot8 * 16, PADDED_D);
++                wmma::mma_sync(o_frag[ot8], p_frag[kc], v_frag, o_frag[ot8]);
+             }
+         }
+-        __syncthreads();
++        __syncthreads();  // all reads of this tile done before prefetch overwrites it
+     }
+ 
++    // ---- Epilogue: normalize O, stage to shared (bf16), vectorized store ----
++    const float inv0 = 1.f / l_prev[0];
++    const float inv1 = 1.f / l_prev[1];
++#pragma unroll
++    for (int ot8 = 0; ot8 < 8; ++ot8) {
++        const int d0 = ot8 * 16;
+ #pragma unroll
+-    for (int r = 0; r < ROWS_PER_WARP; ++r) {
+-        const int grow = m_tile * BLOCK_M + warp * ROWS_PER_WARP + r;
+-        if (grow >= seq_len) continue;
+-        const float inv = row_sum[r] > 0.f ? 1.f / row_sum[r] : 0.f;
++        for (int j = 0; j < 8; ++j) {
++            const int rr = ((j & 2) ? 8 : 0) + lane / 4;
++            const int cc = 2 * (lane % 4) + (j & 1) + ((j & 4) ? 8 : 0);
++            const int grow = m0 + rr;
++            if (grow < seq_len) {
++                sQO[(grow - m0b) * PADDED_D + d0 + cc] =
++                    __float2bfloat16(o_frag[ot8].x[j] * ((j & 2) ? inv1 : inv0));
++            }
++        }
++    }
++    __syncthreads();
++    {
++        constexpr int OUT_CHUNKS = BLOCK_M * HEAD_DIM / 8;
+ #pragma unroll
+-        for (int j = 0; j < D_PER_LANE; ++j)
+-            out[base + (long long)grow * HEAD_DIM + d0 + j]
+-                = __float2bfloat16(acc[r][j] * inv);
++        for (int i = threadIdx.x; i < OUT_CHUNKS; i += NUM_THREADS) {
++            const int row = i / (HEAD_DIM / 8);
++            const int col8 = i % (HEAD_DIM / 8);
++            const int grow = m0b + row;
++            if (grow < seq_len) {
++                *reinterpret_cast<uint4*>(
++                    out + qbase + (long long)grow * HEAD_DIM + col8 * 8) =
++                    *reinterpret_cast<const uint4*>(sQO + row * PADDED_D + col8 * 8);
++            }
++        }
+     }
+ }
+ 
+@@ -137,28 +287,38 @@ torch::Tensor attention_forward(torch::Tensor q, torch::Tensor k,
+     TORCH_CHECK(q.scalar_type() == torch::kBFloat16 &&
+                 k.scalar_type() == torch::kBFloat16 &&
+                 v.scalar_type() == torch::kBFloat16, "q/k/v must be bfloat16");
+-    TORCH_CHECK(q.dim() == 4, "expected [B, H, S, D]");
+-    TORCH_CHECK(q.sizes() == k.sizes() && q.sizes() == v.sizes(),
+-                "q/k/v shapes must match");
+-    TORCH_CHECK(q.size(3) == HEAD_DIM, "head_dim must be ", HEAD_DIM);
++    TORCH_CHECK(q.dim() == 4 && k.dim() == 4 && v.dim() == 4, "expected [B, H, S, D]");
++    TORCH_CHECK(q.size(0) == k.size(0) && q.size(2) == k.size(2) &&
++                q.size(3) == k.size(3) && q.size(3) == HEAD_DIM, "shape mismatch");
++    TORCH_CHECK(k.size(1) == v.size(1) && q.size(1) % k.size(1) == 0,
++                "kv_heads must divide heads");
+     TORCH_CHECK(q.is_contiguous() && k.is_contiguous() && v.is_contiguous(),
+                 "q/k/v must be contiguous");
+ 
+     const at::cuda::CUDAGuard guard(q.device());
+     const int B = q.size(0), H = q.size(1), S = q.size(2);
++    const int kv_heads = k.size(1);
+     TORCH_CHECK((long long)B * H <= 65535, "B*H exceeds grid.y limit");
++    TORCH_CHECK(S >= BLOCK_M, "seq_len must be >= 64");
+ 
+     auto out = torch::empty_like(q);
+     const float scale = 1.0f / sqrtf((float)HEAD_DIM);
+     dim3 grid((S + BLOCK_M - 1) / BLOCK_M, B * H);
+ 
+-    attention_fwd_kernel<<<grid, NUM_THREADS, 0,
++    static bool attr_set = false;
++    if (!attr_set) {
++        cudaFuncSetAttribute(attention_fwd_kernel,
++                             cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM_BYTES);
++        attr_set = true;
++    }
++
++    attention_fwd_kernel<<<grid, NUM_THREADS, SMEM_BYTES,
+                            at::cuda::getCurrentCUDAStream()>>>(
+         reinterpret_cast<const __nv_bfloat16*>(q.data_ptr()),
+         reinterpret_cast<const __nv_bfloat16*>(k.data_ptr()),
+         reinterpret_cast<const __nv_bfloat16*>(v.data_ptr()),
+         reinterpret_cast<__nv_bfloat16*>(out.data_ptr()),
+-        S, scale, causal);
++        S, scale, causal, H, kv_heads);
+     C10_CUDA_KERNEL_LAUNCH_CHECK();
+     return out;
+-}
++}
+\ No newline at end of file
+diff --git a/probe_build.py b/probe_build.py
+new file mode 100644
+index 0000000..391c2e3
+--- /dev/null
++++ b/probe_build.py
+@@ -0,0 +1,50 @@
++import torch, time
++from torch.utils.cpp_extension import load_inline
++
++src = open('attention.cu').read()
++mod = load_inline(
++    name='attn_probe',
++    cpp_sources='torch::Tensor attention_forward(torch::Tensor q, torch::Tensor k, torch::Tensor v, bool causal);',
++    cuda_sources=src,
++    functions=['attention_forward'],
++    extra_cuda_cflags=['-O3', '--use_fast_math'],
++    verbose=False,
++)
++print("built OK")
++
++def ref(q, k, v, causal):
++    B, H, S, D = q.shape
++    kv = k.shape[1]
++    hpk = H // kv
++    scale = D ** -0.5
++    out = torch.empty_like(q)
++    qf = q.float(); kf = k.float(); vf = v.float()
++    for b in range(B):
++        for h in range(H):
++            kh = h // hpk
++            s = torch.einsum('sd,td->st', qf[b, h], kf[b, kh]) * scale
++            if causal:
++                mask = torch.triu(torch.ones(S, S, dtype=torch.bool, device=q.device), 1)
++                s = s.masked_fill(mask, float('-inf'))
++            p = torch.softmax(s, dim=-1)
++            out[b, h] = (p @ vf[b, kh]).bfloat16()
++    return out
++
++torch.manual_seed(0)
++for (B, H, KV, S, causal) in [
++    (2, 4, 4, 64, False),
++    (2, 4, 4, 64, True),
++    (2, 4, 4, 128, True),
++    (1, 8, 2, 256, True),
++    (2, 16, 16, 512, False),
++    (2, 16, 4, 1024, True),
++]:
++    D = 128
++    q = torch.randn(B, H, S, D, device='cuda', dtype=torch.bfloat16)
++    k = torch.randn(B, KV, S, D, device='cuda', dtype=torch.bfloat16)
++    v = torch.randn(B, KV, S, D, device='cuda', dtype=torch.bfloat16)
++    out = mod.attention_forward(q, k, v, causal)
++    r = ref(q, k, v, causal)
++    err = (out.float() - r.float()).abs().max().item()
++    tol = 2 * (0.0039 * 0.5 * 1.5) + 1e-3  # rough; actual threshold in harness
++    print(f"B={B} H={H} KV={KV} S={S} causal={causal} max_err={err:.5f}  {'OK' if err < 0.02 else 'FAIL'}")
+diff --git a/probe_full.cu b/probe_full.cu
+new file mode 100644
+index 0000000..cc9275c
+--- /dev/null
++++ b/probe_full.cu
+@@ -0,0 +1,483 @@
++// Standalone full-kernel copy (torch-free) for debugging.
++// Compile: nvcc -O2 -arch=sm_86 probe_full.cu -o probe_full
++#include <cuda_bf16.h>
++#include <mma.h>
++#include <cstdint>
++#include <cstdio>
++#include <cstdlib>
++#include <cmath>
++#include <vector>
++
++using namespace nvcuda;
++
++constexpr int BLOCK_M = 64;
++constexpr int BLOCK_N = 64;
++constexpr int HEAD_DIM = 128;
++constexpr int NUM_WARPS = 4;
++constexpr int NUM_THREADS = NUM_WARPS * 32;
++constexpr int PADDED_D = HEAD_DIM + 8;
++constexpr int P_COLS = BLOCK_N + 8;
++constexpr int TILE_ELEMS = BLOCK_N * PADDED_D;
++constexpr int O_ELEMS = BLOCK_M * PADDED_D;
++constexpr int P_SMEM = NUM_WARPS * 16 * P_COLS * 2;
++constexpr int SMEM_BYTES = 4 * TILE_ELEMS * 2 + O_ELEMS * 2 + P_SMEM;
++
++__device__ __forceinline__ void cp_async16(void* smem, const void* gmem) {
++    uint32_t s = static_cast<uint32_t>(__cvta_generic_to_shared(smem));
++    asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" :: "r"(s), "l"(gmem));
++}
++__device__ __forceinline__ void cp_async_commit() { asm volatile("cp.async.commit_group;\n"); }
++template<int N>
++__device__ __forceinline__ void cp_async_wait() { asm volatile("cp.async.wait_group %0;\n" :: "n"(N)); }
++
++__device__ __forceinline__ void load_tile(
++    const __nv_bfloat16* __restrict__ src, __nv_bfloat16* __restrict__ dst,
++    int row0, int seq_len)
++{
++    constexpr int CHUNKS = BLOCK_N * HEAD_DIM / 8;
++#pragma unroll
++    for (int i = threadIdx.x; i < CHUNKS; i += NUM_THREADS) {
++        const int row = i / (HEAD_DIM / 8);
++        const int col8 = i % (HEAD_DIM / 8);
++        const int grow = row0 + row;
++        __nv_bfloat16* s = dst + row * PADDED_D + col8 * 8;
++        if (grow < seq_len) {
++            cp_async16(s, src + (long long)grow * HEAD_DIM + col8 * 8);
++        } else {
++            *reinterpret_cast<uint4*>(s) = make_uint4(0, 0, 0, 0);
++        }
++    }
++}
++
++__device__ __forceinline__ float warp_max4(float v) {
++#pragma unroll
++    for (int off = 1; off < 4; off <<= 1)
++        v = fmaxf(v, __shfl_xor_sync(0xffffffffu, v, off));
++    return v;
++}
++__device__ __forceinline__ float warp_sum4(float v) {
++#pragma unroll
++    for (int off = 1; off < 4; off <<= 1)
++        v += __shfl_xor_sync(0xffffffffu, v, off);
++    return v;
++}
++
++__global__ void __launch_bounds__(NUM_THREADS, 1)
++attention_fwd_kernel(const __nv_bfloat16* __restrict__ q,
++                     const __nv_bfloat16* __restrict__ k,
++                     const __nv_bfloat16* __restrict__ v,
++                     __nv_bfloat16* __restrict__ out,
++                     int seq_len, float scale, bool causal,
++                     int num_heads, int kv_heads,
++                     float* __restrict__ dbgS, float* __restrict__ dbgP,
++                     float* __restrict__ dbgL, float* __restrict__ dbgM,
++                     float* __restrict__ dbgP2)
++{
++    extern __shared__ char smem[];
++    __nv_bfloat16* sK0 = reinterpret_cast<__nv_bfloat16*>(smem);
++    __nv_bfloat16* sV0 = sK0 + TILE_ELEMS;
++    __nv_bfloat16* sK1 = sV0 + TILE_ELEMS;
++    __nv_bfloat16* sV1 = sK1 + TILE_ELEMS;
++    __nv_bfloat16* sP = sV1 + TILE_ELEMS;
++    __nv_bfloat16* sQO = sP + NUM_WARPS * 16 * P_COLS;
++
++    const int m_tile = blockIdx.x;
++    const int bh = blockIdx.y;
++    const int b = bh / num_heads;
++    const int h = bh % num_heads;
++    const int h_per_kv = num_heads / kv_heads;
++    const int kvh = h_per_kv > 1 ? h / h_per_kv : h;
++    const long long qbase = (long long)bh * seq_len * HEAD_DIM;
++    const long long kvbase = ((long long)(b * kv_heads + kvh)) * seq_len * HEAD_DIM;
++
++    const int warp = threadIdx.x / 32;
++    const int lane = threadIdx.x % 32;
++    const int m0 = m_tile * BLOCK_M + warp * 16;
++    const int m0b = m_tile * BLOCK_M;
++
++    load_tile(q + qbase, sQO, m0b, seq_len);
++    cp_async_commit();
++    cp_async_wait<0>();
++    __syncthreads();
++
++    wmma::fragment<wmma::matrix_a, 16, 16, 16, __nv_bfloat16, wmma::row_major> q_frag[8];
++#pragma unroll
++    for (int kt = 0; kt < 8; ++kt)
++        wmma::load_matrix_sync(q_frag[kt], sQO + warp * 16 * PADDED_D + kt * 16, PADDED_D);
++
++    wmma::fragment<wmma::accumulator, 16, 16, 16, float> s_frag[4];
++    wmma::fragment<wmma::accumulator, 16, 16, 16, float> o_frag[8];
++    wmma::fragment<wmma::matrix_b, 16, 16, 16, __nv_bfloat16, wmma::col_major> k_frag;
++    wmma::fragment<wmma::matrix_b, 16, 16, 16, __nv_bfloat16, wmma::row_major> v_frag;
++
++#pragma unroll
++    for (int i = 0; i < 8; ++i) wmma::fill_fragment(o_frag[i], 0.f);
++
++    float m_prev[2] = {-INFINITY, -INFINITY};
++    float l_prev[2] = {0.f, 0.f};
++
++    const int n_tiles_total = (seq_len + BLOCK_N - 1) / BLOCK_N;
++    const int n_tiles_block =
++        causal ? min(n_tiles_total, (m0b + BLOCK_M - 1) / BLOCK_N + 1) : n_tiles_total;
++
++    if (n_tiles_block > 0) {
++        load_tile(k + kvbase, sK0, 0, seq_len);
++        load_tile(v + kvbase, sV0, 0, seq_len);
++        cp_async_commit();
++    }
++
++    for (int nt = 0; nt < n_tiles_block; ++nt) {
++        const int buf = nt & 1;
++        __nv_bfloat16* sK = buf ? sK1 : sK0;
++        __nv_bfloat16* sV = buf ? sV1 : sV0;
++        if (nt + 1 < n_tiles_block) {
++            load_tile(k + kvbase, buf ? sK0 : sK1, (nt + 1) * BLOCK_N, seq_len);
++            load_tile(v + kvbase, buf ? sV0 : sV1, (nt + 1) * BLOCK_N, seq_len);
++            cp_async_commit();
++        }
++        if (nt + 1 < n_tiles_block) cp_async_wait<1>(); else cp_async_wait<0>();
++        __syncthreads();
++
++        const int kv0 = nt * BLOCK_N;
++
++#pragma unroll
++        for (int i = 0; i < 4; ++i) {
++            const int kvc = kv0 + 16 * i;
++            const bool full_mask = causal && (kvc > m0 + 15);
++            const bool may_mask = causal && !full_mask &&
++                                  (kvc + 15 >= m0) && (kvc <= m0 + 15);
++            __nv_bfloat16* Pw = sP + warp * (16 * P_COLS) + 16 * i;
++#pragma unroll
++            for (int j = 0; j < 8; ++j) s_frag[i].x[j] = 0.f;
++            if (full_mask) {
++#pragma unroll
++                for (int j = 0; j < 8; ++j) {
++                    const int rr = ((j & 2) ? 8 : 0) + lane / 4;
++                    const int cc = 2 * (lane % 4) + (j & 1) + ((j & 4) ? 8 : 0);
++                    Pw[rr * P_COLS + cc] = __float2bfloat16(0.f);
++                }
++                continue;
++            }
++#pragma unroll
++            for (int kt = 0; kt < 8; ++kt) {
++                wmma::load_matrix_sync(k_frag, sK + (16 * i) * PADDED_D + kt * 16, PADDED_D);
++                wmma::mma_sync(s_frag[i], q_frag[kt], k_frag, s_frag[i]);
++            }
++#pragma unroll
++            for (int j = 0; j < 8; ++j) s_frag[i].x[j] *= scale;
++            if (warp == 0 && dbgS) {
++#pragma unroll
++                for (int j = 0; j < 8; ++j) {
++                    const int rr = ((j & 2) ? 8 : 0) + lane / 4;
++                    const int cc = 2 * (lane % 4) + (j & 1) + ((j & 4) ? 8 : 0);
++                    dbgS[rr * 64 + 16 * i + cc] = s_frag[i].x[j];
++                }
++            }
++            if (may_mask) {
++#pragma unroll
++                for (int j = 0; j < 8; ++j) {
++                    const int rr = ((j & 2) ? 8 : 0) + lane / 4;
++                    const int cc = 2 * (lane % 4) + (j & 1) + ((j & 4) ? 8 : 0);
++                    if (kvc + cc > m0 + rr) s_frag[i].x[j] = -INFINITY;
++                }
++            }
++            float tm0 = fmaxf(fmaxf(s_frag[i].x[0], s_frag[i].x[1]),
++                              fmaxf(s_frag[i].x[4], s_frag[i].x[5]));
++            float tm1 = fmaxf(fmaxf(s_frag[i].x[2], s_frag[i].x[3]),
++                              fmaxf(s_frag[i].x[6], s_frag[i].x[7]));
++            tm0 = warp_max4(tm0);
++            tm1 = warp_max4(tm1);
++            const float mn0 = fmaxf(m_prev[0], tm0);
++            const float mn1 = fmaxf(m_prev[1], tm1);
++            const float corr0 = __expf(m_prev[0] - mn0);
++            const float corr1 = __expf(m_prev[1] - mn1);
++#pragma unroll
++            for (int o = 0; o < 8; ++o) {
++#pragma unroll
++                for (int j = 0; j < 8; ++j)
++                    o_frag[o].x[j] *= ((j & 2) ? corr1 : corr0);
++            }
++            float ps0 = 0.f, ps1 = 0.f;
++#pragma unroll
++            for (int j = 0; j < 8; ++j) {
++                const float p = __expf(s_frag[i].x[j] - ((j & 2) ? mn1 : mn0));
++                s_frag[i].x[j] = p;
++                if (j & 2) ps1 += p; else ps0 += p;
++            }
++            ps0 = warp_sum4(ps0);
++            ps1 = warp_sum4(ps1);
++            l_prev[0] = l_prev[0] * corr0 + ps0;
++            l_prev[1] = l_prev[1] * corr1 + ps1;
++            m_prev[0] = mn0;
++            m_prev[1] = mn1;
++#pragma unroll
++            for (int j = 0; j < 8; ++j) {
++                const int rr = ((j & 2) ? 8 : 0) + lane / 4;
++                const int cc = 2 * (lane % 4) + (j & 1) + ((j & 4) ? 8 : 0);
++                Pw[rr * P_COLS + cc] = __float2bfloat16(s_frag[i].x[j]);
++                if (warp == 0 && dbgP)
++                    dbgP[rr * 64 + 16 * i + cc] = s_frag[i].x[j];
++            }
++        }
++        __syncthreads();
++
++        wmma::fragment<wmma::matrix_a, 16, 16, 16, __nv_bfloat16, wmma::row_major> p_frag[4];
++#pragma unroll
++        for (int kc = 0; kc < 4; ++kc)
++            wmma::load_matrix_sync(p_frag[kc], sP + warp * (16 * P_COLS) + 16 * kc, P_COLS);
++        if (warp == 0 && dbgP) {
++#pragma unroll
++            for (int kc = 0; kc < 4; ++kc) {
++#pragma unroll
++                for (int j = 0; j < 8; ++j) {
++                    const int rr = ((j & 2) ? 8 : 0) + lane / 4;
++                    const int cc = 2 * (lane % 4) + (j & 1) + ((j & 4) ? 8 : 0);
++                    dbgP2[rr * 64 + 16 * kc + cc] = p_frag[kc].x[j];
++                }
++            }
++        }
++#pragma unroll
++        for (int ot8 = 0; ot8 < 8; ++ot8) {
++#pragma unroll
++            for (int kc = 0; kc < 4; ++kc) {
++                wmma::load_matrix_sync(v_frag, sV + (16 * kc) * PADDED_D + ot8 * 16, PADDED_D);
++                wmma::mma_sync(o_frag[ot8], p_frag[kc], v_frag, o_frag[ot8]);
++            }
++        }
++        __syncthreads();
++    }
++
++    const float inv0 = 1.f / l_prev[0];
++    const float inv1 = 1.f / l_prev[1];
++    if (warp == 0 && dbgL) {
++        dbgL[lane / 4] = l_prev[0];
++        dbgL[8 + lane / 4] = l_prev[1];
++        dbgM[lane / 4] = m_prev[0];
++        dbgM[8 + lane / 4] = m_prev[1];
++    }
++#pragma unroll
++    for (int ot8 = 0; ot8 < 8; ++ot8) {
++        const int d0 = ot8 * 16;
++#pragma unroll
++        for (int j = 0; j < 8; ++j) {
++            const int rr = ((j & 2) ? 8 : 0) + lane / 4;
++            const int cc = 2 * (lane % 4) + (j & 1) + ((j & 4) ? 8 : 0);
++            const int grow = m0 + rr;
++            if (grow < seq_len) {
++                sQO[(grow - m0b) * PADDED_D + d0 + cc] =
++                    __float2bfloat16(o_frag[ot8].x[j] * ((j & 2) ? inv1 : inv0));
++            }
++        }
++    }
++    __syncthreads();
++    {
++        constexpr int OUT_CHUNKS = BLOCK_M * HEAD_DIM / 8;
++#pragma unroll
++        for (int i = threadIdx.x; i < OUT_CHUNKS; i += NUM_THREADS) {
++            const int row = i / (HEAD_DIM / 8);
++            const int col8 = i % (HEAD_DIM / 8);
++            const int grow = m0b + row;
++            if (grow < seq_len) {
++                *reinterpret_cast<uint4*>(
++                    out + qbase + (long long)grow * HEAD_DIM + col8 * 8) =
++                    *reinterpret_cast<const uint4*>(sQO + row * PADDED_D + col8 * 8);
++            }
++        }
++    }
++}
++
++// ---------------- host reference ----------------
++void ref_attn(const std::vector<__nv_bfloat16>& q, int B, int H, int S, int D,
++              const std::vector<__nv_bfloat16>& k, int KV, const std::vector<__nv_bfloat16>& v,
++              bool causal, std::vector<__nv_bfloat16>& out) {
++    out.assign(B * H * S * D, __float2bfloat16(0.f));
++    float scale = 1.0f / sqrtf((float)D);
++    int hpk = H / KV;
++    for (int b = 0; b < B; ++b) for (int h = 0; h < H; ++h) {
++        int kh = h / hpk;
++        for (int s = 0; s < S; ++s) {
++            float maxv = -INFINITY;
++            for (int t = 0; t < S; ++t) {
++                if (causal && t > s) break;
++                float acc = 0;
++                for (int d = 0; d < D; ++d)
++                    acc += __bfloat162float(q[((long long)b*H+h)*S*D + s*D + d]) *
++                           __bfloat162float(k[((long long)b*KV+kh)*S*D + t*D + d]);
++                acc *= scale;
++                if (causal && t > s) break;
++                maxv = fmaxf(maxv, acc);
++            }
++            float sum = 0;
++            std::vector<float> p(S);
++            for (int t = 0; t < S; ++t) {
++                if (causal && t > s) break;
++                float acc = 0;
++                for (int d = 0; d < D; ++d)
++                    acc += __bfloat162float(q[((long long)b*H+h)*S*D + s*D + d]) *
++                           __bfloat162float(k[((long long)b*KV+kh)*S*D + t*D + d]);
++                acc *= scale;
++                if (causal && t > s) break;
++                p[t] = expf(acc - maxv);
++                sum += p[t];
++            }
++            for (int d = 0; d < D; ++d) {
++                float acc = 0;
++                for (int t = 0; t < S; ++t) {
++                    if (causal && t > s) break;
++                    acc += p[t] * __bfloat162float(v[((long long)b*KV+kh)*S*D + t*D + d]);
++                }
++                out[((long long)b*H+h)*S*D + s*D + d] = __float2bfloat16(acc / sum);
++            }
++        }
++    }
++}
++
++int main(int argc, char** argv) {
++    int B = 1, H = 2, KV = 2, S = 64;
++    bool causal = false;
++    if (argc > 1) S = atoi(argv[1]);
++    if (argc > 2) causal = atoi(argv[2]);
++    if (argc > 3) H = atoi(argv[3]);
++    if (argc > 4) KV = atoi(argv[4]);
++    const int D = HEAD_DIM;
++    std::vector<__nv_bfloat16> hq(B*H*S*D), hk(B*KV*S*D), hv(B*KV*S*D), href;
++    srand(42);
++    for (auto& x : hq) x = __float2bfloat16((rand() % 2000 - 1000) / 250.0f);
++    for (auto& x : hk) x = __float2bfloat16((rand() % 2000 - 1000) / 250.0f);
++    for (auto& x : hv) x = __float2bfloat16((rand() % 2000 - 1000) / 250.0f);
++
++    __nv_bfloat16 *dq, *dk, *dv, *dout;
++    cudaMalloc(&dq, B*H*S*D*2); cudaMalloc(&dk, B*KV*S*D*2);
++    cudaMalloc(&dv, B*KV*S*D*2); cudaMalloc(&dout, B*H*S*D*2);
++    cudaMemcpy(dq, hq.data(), B*H*S*D*2, cudaMemcpyHostToDevice);
++    cudaMemcpy(dk, hk.data(), B*KV*S*D*2, cudaMemcpyHostToDevice);
++    cudaMemcpy(dv, hv.data(), B*KV*S*D*2, cudaMemcpyHostToDevice);
++
++    cudaFuncSetAttribute(attention_fwd_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM_BYTES);
++    dim3 grid((S + BLOCK_M - 1) / BLOCK_M, B * H);
++    float *dbgS = nullptr, *dbgP = nullptr, *dbgL = nullptr, *dbgM = nullptr, *dbgP2 = nullptr;
++    if (B*H == 1) {
++        cudaMalloc(&dbgS, 16 * 64 * 4);
++        cudaMalloc(&dbgP, 16 * 64 * 4);
++        cudaMalloc(&dbgL, 16 * 4);
++        cudaMalloc(&dbgM, 16 * 4);
++        cudaMalloc(&dbgP2, 16 * 64 * 4);
++        cudaMemset(dbgS, 0, 16 * 64 * 4);
++        cudaMemset(dbgP, 0, 16 * 64 * 4);
++        cudaMemset(dbgP2, 0, 16 * 64 * 4);
++    }
++    attention_fwd_kernel<<<grid, NUM_THREADS, SMEM_BYTES>>>(dq, dk, dv, dout, S, 1.0f/sqrtf(D), causal, H, KV, dbgS, dbgP, dbgL, dbgM, dbgP2);
++    cudaError_t err = cudaDeviceSynchronize();
++    if (err != cudaSuccess) { printf("kernel error: %s\n", cudaGetErrorString(err)); return 1; }
++
++    ref_attn(hq, B, H, S, D, hk, KV, hv, causal, href);
++
++    if (dbgS) {
++        // compare S vs reference QK^T for head 0, rows 0..15
++        std::vector<float> hS(16*64), hP(16*64), hP2(16*64);
++        cudaMemcpy(hS.data(), dbgS, 16*64*4, cudaMemcpyDeviceToHost);
++        cudaMemcpy(hP.data(), dbgP, 16*64*4, cudaMemcpyDeviceToHost);
++        cudaMemcpy(hP2.data(), dbgP2, 16*64*4, cudaMemcpyDeviceToHost);
++        float pdev = 0; int pdarg = -1;
++        for (int i = 0; i < 16*64; ++i) {
++            float e = fabsf(hP[i] - hP2[i]);
++            if (e > pdev) { pdev = e; pdarg = i; }
++        }
++        printf("  P(stored) vs P(loaded) max dev = %g at (%d,%d) stored=%g loaded=%g\n",
++               pdev, pdarg/64, pdarg%64, hP[pdarg], hP2[pdarg]);
++        // compare full output rows for head 0 vs ref (need hout0 + hL first)
++        std::vector<__nv_bfloat16> hout0(B*H*S*D);
++        cudaMemcpy(hout0.data(), dout, B*H*S*D*2, cudaMemcpyDeviceToHost);
++        std::vector<float> hL(16), hM(16);
++        cudaMemcpy(hL.data(), dbgL, 16*4, cudaMemcpyDeviceToHost);
++        cudaMemcpy(hM.data(), dbgM, 16*4, cudaMemcpyDeviceToHost);
++        // host-compute O = P_loaded . V / l  and compare with kernel output
++        for (int r = 0; r < 16; ++r) {
++            float oexp = 0, oexp32 = 0;
++            for (int c = 0; c < 64; ++c) {
++                oexp += hP2[r*64+c] * __bfloat162float(hv[c*D]);
++                oexp32 += hP2[r*64+c] * __bfloat162float(hv[c*D+32]);
++            }
++            oexp /= hL[r]; oexp32 /= hL[r];
++            float got0 = __bfloat162float(hout0[r*D]);
++            float got32 = __bfloat162float(hout0[r*D+32]);
++            if (fabsf(got0 - oexp) > 0.05f || fabsf(got32 - oexp32) > 0.05f)
++                printf("  PVfull mismatch row %2d: got0=%.4f exp0=%.4f got32=%.4f exp32=%.4f\n", r, got0, oexp, got32, oexp32);
++        }
++        printf("  (PVfull done)\n");
++        int kh = 0;
++        double maxSe = 0; int argS = -1;
++        for (int r = 0; r < 16; ++r) for (int c = 0; c < 64; ++c) {
++            double ref = 0;
++            for (int d = 0; d < D; ++d)
++                ref += __bfloat162float(hq[r*D+d]) * __bfloat162float(hk[kh*S*D + c*D+d]);
++            ref *= 1.0f/sqrtf(D);
++            double e = fabs(hS[r*64+c] - ref);
++            if (e > maxSe) { maxSe = e; argS = r*64+c; }
++        }
++        printf("  S max err = %g at r=%d c=%d (got %g, ref %g)\n", maxSe, argS/64, argS%64, hS[argS], (double)0);
++        // verify row sums of P ~ 1
++        double worst = 0; int wr = -1;
++        for (int r = 0; r < 16; ++r) {
++            double ssum = 0;
++            for (int c = 0; c < 64; ++c) ssum += hP[r*64+c];
++            double e = fabs(ssum - 1.0);
++            if (e > worst) { worst = e; wr = r; }
++        }
++        printf("  P row-sum max dev = %g at row %d\n", worst, wr);
++        printf("  S row4 : "); for (int c = 0; c < 16; ++c) printf("%.2f ", hS[4*64+c]); printf("\n");
++        printf("  P row4 : "); for (int c = 0; c < 16; ++c) printf("%.2f ", hP[4*64+c]); printf("\n");
++        // compare full output rows for head 0 vs ref
++        for (int r = 0; r < 16; ++r) {
++            float gmax = 0;
++            for (int d = 0; d < D; ++d)
++                gmax = fmaxf(gmax, fabsf(__bfloat162float(hout0[r*D+d]) - __bfloat162float(href[r*D+d])));
++            printf("  out row %2d maxdiff %.4f  got[0]=%.4f ref[0]=%.4f\n", r, gmax,
++                   __bfloat162float(hout0[r*D]), __bfloat162float(href[r*D]));
++        }
++        // reference softmax of row 4
++        float mref = -1e30f;
++        for (int c = 0; c < 64; ++c) mref = fmaxf(mref, hS[4*64+c]);
++        printf("  ref exp row4: "); for (int c = 0; c < 16; ++c) printf("%.4f ", expf(hS[4*64+c]-mref)); printf("\n");
++        // O computed from the kernel's own S (proper softmax), all 64 cols
++        for (int r = 0; r < 16; ++r) {
++            float mref2 = -1e30f;
++            for (int c = 0; c < 64; ++c) mref2 = fmaxf(mref2, hS[r*64+c]);
++            float lsum = 0; float oref0 = 0, oref32 = 0;
++            for (int c = 0; c < 64; ++c) {
++                float p = expf(hS[r*64+c] - mref2);
++                lsum += p;
++                oref0 += p * __bfloat162float(hv[c*D]);
++                oref32 += p * __bfloat162float(hv[c*D+32]);
++            }
++            oref0 /= lsum; oref32 /= lsum;
++            float got0 = __bfloat162float(hout0[r*D]);
++            float got32 = __bfloat162float(hout0[r*D+32]);
++            float d0 = fabsf(got0 - oref0), d32 = fabsf(got32 - oref32);
++            if (d0 > 0.05f || d32 > 0.05f)
++                printf("  S-softmax mismatch row %2d: got0=%.4f exp0=%.4f got32=%.4f exp32=%.4f\n", r, got0, oref0, got32, oref32);
++        }
++        printf("  (S-softmax check done)\n");
++        // dump l and m (reuse hL/hM from earlier)
++        for (int r = 0; r < 16; ++r) {
++            float mref3 = -1e30f, lref3 = 0;
++            for (int c = 0; c < 64; ++c) mref3 = fmaxf(mref3, hS[r*64+c]);
++            for (int c = 0; c < 64; ++c) lref3 += expf(hS[r*64+c] - mref3);
++            printf("  row %2d: kernel m=%.4f (ref %.4f)  kernel l=%.4f (ref %.4f)\n",
++                   r, hM[r], mref3, hL[r], lref3);
++        }
++    }
++
++    std::vector<__nv_bfloat16> hout(B*H*S*D);
++    cudaMemcpy(hout.data(), dout, B*H*S*D*2, cudaMemcpyDeviceToHost);
++
++    double maxerr = 0; int argb=-1, argh=-1, args=-1, argd=-1;    for (int i = 0; i < B*H*S*D; ++i) {
++        double e = fabs(__bfloat162float(hout[i]) - __bfloat162float(href[i]));
++        if (e > maxerr) { maxerr = e; argb = i/(H*S*D); argh = (i/(S*D))%H; args = (i/D)%S; argd = i%D; }
++    }
++    printf("B=%d H=%d KV=%d S=%d causal=%d  maxerr=%g  at (b=%d h=%d s=%d d=%d) got=%g ref=%g\n",
++           B, H, KV, S, causal, maxerr, argb, argh, args, argd,
++           __bfloat162float(hout[(argb*H+argh)*S*D+args*D+argd]),
++           __bfloat162float(href[(argb*H+argh)*S*D+args*D+argd]));
++    return 0;
++}
+diff --git a/probe_pv.cu b/probe_pv.cu
+new file mode 100644
+index 0000000..97df24f
+--- /dev/null
++++ b/probe_pv.cu
+@@ -0,0 +1,71 @@
++// Minimal test of PV layout: O = P * V with P staged through padded smem,
++// V loaded as matrix_b row_major from padded smem, accumulator layout stored
++// with same rr/cc mapping as attention.cu
++#include <cuda_bf16.h>
++#include <mma.h>
++#include <cstdio>
++#include <cstdlib>
++#include <cmath>
++
++using namespace nvcuda;
++constexpr int PADDED_D = 136;
++constexpr int P_COLS = 72;
++
++__global__ void pv_kernel(const __nv_bfloat16* P, const __nv_bfloat16* V,
++                          float* O, int ldO) {
++    __shared__ __nv_bfloat16 sP[16 * P_COLS];
++    __shared__ __nv_bfloat16 sV[64 * PADDED_D];
++    int t = threadIdx.x;
++    for (int i = t; i < 16 * 64; i += 32) sP[(i / 64) * P_COLS + (i % 64)] = P[i];
++    for (int i = t; i < 64 * 128; i += 32) sV[(i / 128) * PADDED_D + (i % 128)] = V[i];
++    __syncthreads();
++
++    wmma::fragment<wmma::matrix_a, 16, 16, 16, __nv_bfloat16, wmma::row_major> p_frag[4];
++    wmma::fragment<wmma::matrix_b, 16, 16, 16, __nv_bfloat16, wmma::row_major> v_frag;
++    wmma::fragment<wmma::accumulator, 16, 16, 16, float> o_frag[8];
++    for (int i = 0; i < 8; ++i)
++        for (int j = 0; j < 8; ++j) o_frag[i].x[j] = 0.f;
++    for (int kc = 0; kc < 4; ++kc)
++        wmma::load_matrix_sync(p_frag[kc], sP + 16 * kc, P_COLS);
++    for (int ot8 = 0; ot8 < 8; ++ot8) {
++        for (int kc = 0; kc < 4; ++kc) {
++            wmma::load_matrix_sync(v_frag, sV + (16 * kc) * PADDED_D + ot8 * 16, PADDED_D);
++            wmma::mma_sync(o_frag[ot8], p_frag[kc], v_frag, o_frag[ot8]);
++        }
++    }
++    int lane = threadIdx.x % 32;
++    for (int ot8 = 0; ot8 < 8; ++ot8) {
++        for (int j = 0; j < 8; ++j) {
++            int rr = ((j & 2) ? 8 : 0) + lane / 4;
++            int cc = 2 * (lane % 4) + (j & 1) + ((j & 4) ? 8 : 0);
++            O[rr * ldO + (ot8 * 16 + cc)] = o_frag[ot8].x[j];
++        }
++    }
++}
++
++int main() {
++    const int M = 16, N = 64, Kdim = 128;
++    __nv_bfloat16 *P, *V; float *O;
++    cudaMalloc(&P, M * N * 2); cudaMalloc(&V, N * Kdim * 2); cudaMalloc(&O, M * Kdim * 4);
++    __nv_bfloat16 hP[M * N], hV[N * Kdim];
++    for (int i = 0; i < M * N; ++i) hP[i] = __float2bfloat16(((i * 3) % 17) / 8.0f - 1.0f);
++    for (int i = 0; i < N * Kdim; ++i) hV[i] = __float2bfloat16(((i * 11) % 7) / 4.0f - 0.75f);
++    cudaMemcpy(P, hP, M * N * 2, cudaMemcpyHostToDevice);
++    cudaMemcpy(V, hV, N * Kdim * 2, cudaMemcpyHostToDevice);
++    pv_kernel<<<1, 32>>>(P, V, O, Kdim);
++    cudaDeviceSynchronize();
++    float hO[M * Kdim];
++    cudaMemcpy(hO, O, M * Kdim * 4, cudaMemcpyDeviceToHost);
++    double maxerr = 0; int argm = -1, argn = -1;
++    for (int m = 0; m < M; ++m) for (int n = 0; n < Kdim; ++n) {
++        double ref = 0;
++        for (int k = 0; k < N; ++k) ref += (double)__bfloat162float(hP[m * N + k]) * __bfloat162float(hV[k * Kdim + n]);
++        double e = fabs(hO[m * Kdim + n] - ref);
++        if (e > maxerr) { maxerr = e; argm = m; argn = n; }
++    }
++    if (argm < 0) printf("PV max err = 0 (exact)\n");
++    else printf("PV max err = %g at (%d,%d) got=%g ref=%g\n", maxerr, argm, argn,
++                hO[argm * Kdim + argn], (double)0);
++    cudaFree(P); cudaFree(V); cudaFree(O);
++    return 0;
++}
+diff --git a/probe_qk.cu b/probe_qk.cu
+new file mode 100644
+index 0000000..ccb2293
+--- /dev/null
++++ b/probe_qk.cu
+@@ -0,0 +1,70 @@
++// Minimal standalone test of the wmma layouts used in attention.cu
++#include <cuda_bf16.h>
++#include <mma.h>
++#include <cstdio>
++#include <cstdlib>
++#include <cmath>
++
++using namespace nvcuda;
++constexpr int PADDED_D = 136;
++constexpr int P_COLS = 72;
++
++__global__ void qk_kernel(const __nv_bfloat16* Q, const __nv_bfloat16* K,
++                          float* S, int ldS) {
++    __shared__ __nv_bfloat16 sQ[16 * PADDED_D];
++    __shared__ __nv_bfloat16 sK[64 * PADDED_D];
++    int t = threadIdx.x;
++    for (int i = t; i < 16 * 128; i += 32) sQ[(i / 128) * PADDED_D + (i % 128)] = Q[i];
++    for (int i = t; i < 64 * 128; i += 32) sK[(i / 128) * PADDED_D + (i % 128)] = K[i];
++    __syncthreads();
++
++    wmma::fragment<wmma::matrix_a, 16, 16, 16, __nv_bfloat16, wmma::row_major> q_frag[8];
++    for (int kt = 0; kt < 8; ++kt)
++        wmma::load_matrix_sync(q_frag[kt], sQ + kt * 16, PADDED_D);
++
++    wmma::fragment<wmma::accumulator, 16, 16, 16, float> s_frag[4];
++    wmma::fragment<wmma::matrix_b, 16, 16, 16, __nv_bfloat16, wmma::col_major> k_frag;
++    for (int i = 0; i < 4; ++i)
++        for (int j = 0; j < 8; ++j) s_frag[i].x[j] = 0.f;
++    for (int i = 0; i < 4; ++i) {
++        for (int kt = 0; kt < 8; ++kt) {
++            wmma::load_matrix_sync(k_frag, sK + (16 * i) * PADDED_D + kt * 16, PADDED_D);
++            wmma::mma_sync(s_frag[i], q_frag[kt], k_frag, s_frag[i]);
++        }
++    }
++    // store fragment to S with the SAME rr/cc mapping as attention.cu
++    int lane = threadIdx.x % 32;
++    for (int i = 0; i < 4; ++i) {
++        for (int j = 0; j < 8; ++j) {
++            int rr = ((j & 2) ? 8 : 0) + lane / 4;
++            int cc = 2 * (lane % 4) + (j & 1) + ((j & 4) ? 8 : 0);
++            S[rr * ldS + (16 * i + cc)] = s_frag[i].x[j];
++        }
++    }
++}
++
++int main() {
++    const int M = 16, N = 64, Kdim = 128;
++    __nv_bfloat16 *Q, *K; float *S;
++    cudaMalloc(&Q, M * Kdim * 2); cudaMalloc(&K, N * Kdim * 2); cudaMalloc(&S, M * N * 4);
++    __nv_bfloat16 hQ[M * Kdim], hK[N * Kdim];
++    for (int i = 0; i < M * Kdim; ++i) hQ[i] = __float2bfloat16(((i * 7) % 13) - 6);
++    for (int i = 0; i < N * Kdim; ++i) hK[i] = __float2bfloat16(((i * 5) % 11) - 5);
++    cudaMemcpy(Q, hQ, M * Kdim * 2, cudaMemcpyHostToDevice);
++    cudaMemcpy(K, hK, N * Kdim * 2, cudaMemcpyHostToDevice);
++    qk_kernel<<<1, 32>>>(Q, K, S, N);
++    cudaDeviceSynchronize();
++    float hS[M * N];
++    cudaMemcpy(hS, S, M * N * 4, cudaMemcpyDeviceToHost);
++    double maxerr = 0; int argm = -1, argn = -1;
++    for (int m = 0; m < M; ++m) for (int n = 0; n < N; ++n) {
++        double ref = 0;
++        for (int k = 0; k < Kdim; ++k) ref += (double)__bfloat162float(hQ[m * Kdim + k]) * __bfloat162float(hK[n * Kdim + k]);
++        double e = fabs(hS[m * N + n] - ref);
++        if (e > maxerr) { maxerr = e; argm = m; argn = n; }
++    }
++    printf("QK max err = %g at (%d,%d) got=%g ref=%g\n", maxerr, argm, argn, hS[argm * N + argn],
++           (double)0);
++    cudaFree(Q); cudaFree(K); cudaFree(S);
++    return 0;
++}

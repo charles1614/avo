@@ -1,0 +1,161 @@
+diff --git a/attention.cu b/attention.cu
+index 7b38dd3..3586753 100644
+--- a/attention.cu
++++ b/attention.cu
+@@ -23,14 +23,14 @@ constexpr int HEAD_DIM = 128;
+ constexpr int NUM_WARPS = 4;
+ constexpr int NUM_THREADS = NUM_WARPS * 32;
+ constexpr int PADDED_D = HEAD_DIM + 8;        // 16 B/row padding (K/V tiles)
+-constexpr int PADDED_Q = HEAD_DIM + 8;        // Q/O buffer stride == PADDED_D
+ constexpr int TILE_ELEMS = BLOCK_N * PADDED_D;  // per K or V tile (bf16)
+-constexpr int O_ELEMS = BLOCK_M * PADDED_Q;     // O staging (reuses Q buffer)
+-// Single-buffered K/V (2 tiles) + compact Q/O buffer keeps smem at 25,600 B
+-// -> 4 blocks/SM on sm_86 (16 warps vs 12) on this latency-bound kernel.
+-// P is fed to the PV matmul directly from registers (wmma m16n16k16 matrix_a
+-// row_major layout == accumulator layout), no smem round-trip.
+-constexpr int SMEM_BYTES = 2 * TILE_ELEMS * 2 + O_ELEMS * 2;  // 25,600 B
++// No Q/O shared buffers: Q is pulled straight from gmem into register
++// fragments (once per block) and O is written straight to gmem from the
++// accumulator (epilogue stores are fully coalesced). Shared holds only
++// double-buffered K/V: 2 buffers x 2 tiles x 4,352 B = 17,408 B, so
++// 4 blocks/SM (16 warps) fit under the 99,328 B usable smem/SM and the
++// cp.async prefetch of tile nt+1 overlaps the compute of tile nt.
++constexpr int SMEM_BYTES = 2 * 2 * TILE_ELEMS * 2;  // 17,408 B
+ 
+ __device__ __forceinline__ void cp_async16(void* smem, const void* gmem) {
+     uint32_t s = static_cast<uint32_t>(__cvta_generic_to_shared(smem));
+@@ -79,7 +79,7 @@ __device__ __forceinline__ float warp_sum4(float v) {
+     return v;
+ }
+ 
+-__global__ void __launch_bounds__(NUM_THREADS, 3)
++__global__ void __launch_bounds__(NUM_THREADS, 4)
+ attention_fwd_kernel(const __nv_bfloat16* __restrict__ q,
+                      const __nv_bfloat16* __restrict__ k,
+                      const __nv_bfloat16* __restrict__ v,
+@@ -88,9 +88,10 @@ attention_fwd_kernel(const __nv_bfloat16* __restrict__ q,
+                      int num_heads, int kv_heads)
+ {
+     extern __shared__ char smem[];
+-    __nv_bfloat16* sK = reinterpret_cast<__nv_bfloat16*>(smem);
++    __nv_bfloat16* sK = reinterpret_cast<__nv_bfloat16*>(smem);   // buffer 0
+     __nv_bfloat16* sV = sK + TILE_ELEMS;
+-    __nv_bfloat16* sQO = sV + TILE_ELEMS;  // Q staging; reused for O staging
++    __nv_bfloat16* sK1 = sV + TILE_ELEMS;                          // buffer 1
++    __nv_bfloat16* sV1 = sK1 + TILE_ELEMS;
+ 
+     const int m_tile = blockIdx.x;
+     const int bh = blockIdx.y;
+@@ -106,16 +107,24 @@ attention_fwd_kernel(const __nv_bfloat16* __restrict__ q,
+     const int m0 = m_tile * BLOCK_M + warp * 16;  // first global row of this warp
+     const int m0b = m_tile * BLOCK_M;             // first global row of the block
+ 
+-    // Stage Q into shared (zero-fill OOB rows), then pull into register fragments.
+-    load_tile(q + qbase, sQO, m0b, seq_len, BLOCK_M, PADDED_Q);
+-    cp_async_commit();
+-    cp_async_wait<0>();
+-    __syncthreads();
+-
++    // Pull Q directly from gmem into register fragments (once per block).
++    // wmma::load_matrix_sync's ldmatrix path is shared-memory-only, so load
++    // per-element with the known matrix_a row_major layout (== accumulator
++    // layout mapping used for P): x[j] <- row (j&2?8:0)+lane/4, col
++    // 2*(lane%4)+(j&1)+(j&4?8:0).
+     wmma::fragment<wmma::matrix_a, 16, 16, 16, __nv_bfloat16, wmma::row_major> q_frag[8];
++    const bool q_valid = (m0 + 15 < seq_len);
++#pragma unroll
++    for (int kt = 0; kt < 8; ++kt) {
+ #pragma unroll
+-    for (int kt = 0; kt < 8; ++kt)
+-        wmma::load_matrix_sync(q_frag[kt], sQO + warp * 16 * PADDED_Q + kt * 16, PADDED_Q);
++        for (int j = 0; j < 8; ++j) {
++            const int rr = ((j & 2) ? 8 : 0) + lane / 4;
++            const int cc = 2 * (lane % 4) + (j & 1) + ((j & 4) ? 8 : 0);
++            q_frag[kt].x[j] = q_valid
++                ? q[qbase + (long long)(m0 + rr) * HEAD_DIM + kt * 16 + cc]
++                : __float2bfloat16(0.f);
++        }
++    }
+ 
+     wmma::fragment<wmma::accumulator, 16, 16, 16, float> o_frag[8];
+     wmma::fragment<wmma::matrix_b, 16, 16, 16, __nv_bfloat16, wmma::col_major> k_frag;
+@@ -138,7 +147,19 @@ attention_fwd_kernel(const __nv_bfloat16* __restrict__ q,
+     }
+ 
+     for (int nt = 0; nt < n_tiles_block; ++nt) {
+-        cp_async_wait<0>();
++        const int buf = nt & 1;
++        __nv_bfloat16* sKb = buf ? sK + TILE_ELEMS : sK;
++        __nv_bfloat16* sVb = buf ? sV + TILE_ELEMS : sV;
++        // Prefetch tile nt+1 into the other buffer while tile nt computes.
++        if (nt + 1 < n_tiles_block) {
++            load_tile(k + kvbase, buf ? sK : sK1, (nt + 1) * BLOCK_N,
++                      seq_len, BLOCK_N, PADDED_D);
++            load_tile(v + kvbase, buf ? sV : sV1, (nt + 1) * BLOCK_N,
++                      seq_len, BLOCK_N, PADDED_D);
++            cp_async_commit();
++        }
++        if (nt + 1 == n_tiles_block) cp_async_wait<0>();
++        else cp_async_wait<1>();  // tile nt arrived; tile nt+1 may still fly
+         __syncthreads();
+         const int kv0 = nt * BLOCK_N;
+ 
+@@ -162,7 +183,7 @@ attention_fwd_kernel(const __nv_bfloat16* __restrict__ q,
+             }
+ #pragma unroll
+             for (int kt = 0; kt < 8; ++kt) {
+-                wmma::load_matrix_sync(k_frag, sK + (16 * i) * PADDED_D + kt * 16, PADDED_D);
++                wmma::load_matrix_sync(k_frag, sKb + (16 * i) * PADDED_D + kt * 16, PADDED_D);
+                 wmma::mma_sync(s_frag, q_frag[kt], k_frag, s_frag);
+             }
+ #pragma unroll
+@@ -222,19 +243,14 @@ attention_fwd_kernel(const __nv_bfloat16* __restrict__ q,
+                 p_frag.x[j] = __float2bfloat16(s_frag.x[j]);
+ #pragma unroll
+             for (int ot8 = 0; ot8 < 8; ++ot8) {
+-                wmma::load_matrix_sync(v_frag, sV + (16 * i) * PADDED_D + ot8 * 16, PADDED_D);
++                wmma::load_matrix_sync(v_frag, sVb + (16 * i) * PADDED_D + ot8 * 16, PADDED_D);
+                 wmma::mma_sync(o_frag[ot8], p_frag, v_frag, o_frag[ot8]);
+             }
+         }
+         __syncthreads();  // all reads of this tile done before prefetch overwrites it
+-        if (nt + 1 < n_tiles_block) {
+-            load_tile(k + kvbase, sK, (nt + 1) * BLOCK_N, seq_len, BLOCK_N, PADDED_D);
+-            load_tile(v + kvbase, sV, (nt + 1) * BLOCK_N, seq_len, BLOCK_N, PADDED_D);
+-            cp_async_commit();
+-        }
+     }
+ 
+-    // ---- Epilogue: normalize O, stage to shared (bf16), vectorized store ----
++    // ---- Epilogue: normalize O and store straight to gmem (coalesced) ----
+     const float inv0 = 1.f / l_prev[0];
+     const float inv1 = 1.f / l_prev[1];
+ #pragma unroll
+@@ -246,26 +262,11 @@ attention_fwd_kernel(const __nv_bfloat16* __restrict__ q,
+             const int cc = 2 * (lane % 4) + (j & 1) + ((j & 4) ? 8 : 0);
+             const int grow = m0 + rr;
+             if (grow < seq_len) {
+-                sQO[(grow - m0b) * PADDED_Q + d0 + cc] =
++                out[qbase + (long long)grow * HEAD_DIM + d0 + cc] =
+                     __float2bfloat16(o_frag[ot8].x[j] * ((j & 2) ? inv1 : inv0));
+             }
+         }
+     }
+-    __syncthreads();
+-    {
+-        constexpr int OUT_CHUNKS = BLOCK_M * HEAD_DIM / 8;
+-#pragma unroll
+-        for (int i = threadIdx.x; i < OUT_CHUNKS; i += NUM_THREADS) {
+-            const int row = i / (HEAD_DIM / 8);
+-            const int col8 = i % (HEAD_DIM / 8);
+-            const int grow = m0b + row;
+-            if (grow < seq_len) {
+-                *reinterpret_cast<uint4*>(
+-                    out + qbase + (long long)grow * HEAD_DIM + col8 * 8) =
+-                    *reinterpret_cast<const uint4*>(sQO + row * PADDED_Q + col8 * 8);
+-            }
+-        }
+-    }
+ }
+ 
+ }  // namespace

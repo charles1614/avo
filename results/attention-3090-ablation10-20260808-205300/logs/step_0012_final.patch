@@ -1,0 +1,165 @@
+diff --git a/attention.cu b/attention.cu
+index 3907af3..09cd460 100644
+--- a/attention.cu
++++ b/attention.cu
+@@ -18,7 +18,7 @@ namespace {
+ using namespace nvcuda;
+ 
+ constexpr int BLOCK_M = 64;    // query rows per block
+-constexpr int BLOCK_N = 32;    // kv rows per tile
++constexpr int BLOCK_N = 16;    // kv rows per tile
+ constexpr int HEAD_DIM = 128;
+ constexpr int NUM_WARPS = 4;
+ constexpr int NUM_THREADS = NUM_WARPS * 32;
+@@ -26,11 +26,11 @@ constexpr int PADDED_D = HEAD_DIM + 8;        // 16 B/row padding (K/V tiles)
+ constexpr int PADDED_Q = HEAD_DIM + 8;        // Q/O buffer stride == PADDED_D
+ constexpr int TILE_ELEMS = BLOCK_N * PADDED_D;  // per K or V tile (bf16)
+ constexpr int O_ELEMS = BLOCK_M * PADDED_Q;     // O staging (reuses Q buffer)
+-// Single-buffered K/V (2 tiles) + compact Q/O buffer keeps smem at 25,600 B
+-// -> 4 blocks/SM on sm_86 (16 warps vs 12) on this latency-bound kernel.
+-// P is fed to the PV matmul directly from registers (wmma m16n16k16 matrix_a
+-// row_major layout == accumulator layout), no smem round-trip.
+-constexpr int SMEM_BYTES = 2 * TILE_ELEMS * 2;  // 17,408 B (no Q/O buffers)
++// Double-buffered K/V (2 tiles x 2 buffers) keeps smem at 17,408 B
++// -> 4 blocks/SM on sm_86 (16 warps) while fully overlapping the cp.async
++// load of tile nt+1 with the compute of tile nt (previously the prefetch
++// was issued after compute -> gmem latency was exposed serially per tile).
++constexpr int SMEM_BYTES = 4 * TILE_ELEMS * 2;  // 17,408 B (no Q/O buffers)
+ 
+ __device__ __forceinline__ void cp_async16(void* smem, const void* gmem) {
+     uint32_t s = static_cast<uint32_t>(__cvta_generic_to_shared(smem));
+@@ -141,6 +141,9 @@ attention_fwd_kernel(const __nv_bfloat16* __restrict__ q,
+     }
+ 
+     for (int nt = 0; nt < n_tiles_block; ++nt) {
++        const int buf = nt & 1;
++        __nv_bfloat16* cK = sK + buf * TILE_ELEMS;
++        __nv_bfloat16* cV = sV + buf * TILE_ELEMS;
+         cp_async_wait<0>();
+         __syncthreads();
+         const int kv0 = nt * BLOCK_N;
+@@ -165,7 +168,7 @@ attention_fwd_kernel(const __nv_bfloat16* __restrict__ q,
+             }
+ #pragma unroll
+             for (int kt = 0; kt < 8; ++kt) {
+-                wmma::load_matrix_sync(k_frag, sK + (16 * i) * PADDED_D + kt * 16, PADDED_D);
++                wmma::load_matrix_sync(k_frag, cK + (16 * i) * PADDED_D + kt * 16, PADDED_D);
+                 wmma::mma_sync(s_frag, q_frag[kt], k_frag, s_frag);
+             }
+ #pragma unroll
+@@ -236,14 +239,16 @@ attention_fwd_kernel(const __nv_bfloat16* __restrict__ q,
+                 p_frag.x[j] = __float2bfloat16(s_frag.x[j]);
+ #pragma unroll
+             for (int ot8 = 0; ot8 < 8; ++ot8) {
+-                wmma::load_matrix_sync(v_frag, sV + (16 * i) * PADDED_D + ot8 * 16, PADDED_D);
++                wmma::load_matrix_sync(v_frag, cV + (16 * i) * PADDED_D + ot8 * 16, PADDED_D);
+                 wmma::mma_sync(o_frag[ot8], p_frag, v_frag, o_frag[ot8]);
+             }
+         }
+-        __syncthreads();  // all reads of this tile done before prefetch overwrites it
++        __syncthreads();  // all reads of buffer buf done before next prefetch overwrites it
+         if (nt + 1 < n_tiles_block) {
+-            load_tile(k + kvbase, sK, (nt + 1) * BLOCK_N, seq_len, BLOCK_N, PADDED_D);
+-            load_tile(v + kvbase, sV, (nt + 1) * BLOCK_N, seq_len, BLOCK_N, PADDED_D);
++            load_tile(k + kvbase, sK + (buf ^ 1) * TILE_ELEMS,
++                      (nt + 1) * BLOCK_N, seq_len, BLOCK_N, PADDED_D);
++            load_tile(v + kvbase, sV + (buf ^ 1) * TILE_ELEMS,
++                      (nt + 1) * BLOCK_N, seq_len, BLOCK_N, PADDED_D);
+             cp_async_commit();
+         }
+     }
+diff --git a/dbg_min.cu b/dbg_min.cu
+new file mode 100644
+index 0000000..5020924
+--- /dev/null
++++ b/dbg_min.cu
+@@ -0,0 +1,52 @@
++#include <cuda_fp16.h>
++#include <cstdio>
++#include <cstdint>
++#include <vector>
++using namespace std;
++
++__device__ __forceinline__ void cp16(void* smem, const void* gmem) {
++    uint32_t s = static_cast<uint32_t>(__cvta_generic_to_shared(smem));
++    asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" :: "r"(s), "l"(gmem));
++}
++__device__ __forceinline__ void commit() { asm volatile("cp.async.commit_group;\n"); }
++template<int N> __device__ __forceinline__ void wait() { asm volatile("cp.async.wait_group %0;\n" :: "n"(N)); }
++
++// 16 threads; each copies one 16B chunk (8 halfs) per tile.
++__global__ void tk(const __half* src, float* dst, int ntiles) {
++    __shared__ __half buf[2][128];
++    const int t = threadIdx.x;  // 16 threads
++    cp16(&buf[0][t * 8], src + t * 8);
++    commit();
++    for (int nt = 0; nt < ntiles; ++nt) {
++        if (nt + 1 < ntiles) {
++            cp16(&buf[(nt + 1) & 1][t * 8], src + (nt + 1) * 128 + t * 8);
++            commit();
++            wait<1>();
++        } else {
++            wait<0>();
++        }
++        __syncthreads();
++        for (int j = 0; j < 8; ++j) dst[nt * 128 + t * 8 + j] = (float)buf[nt & 1][t * 8 + j];
++        __syncthreads();
++    }
++}
++
++int main() {
++    const int ntiles = 8, N = ntiles * 128;
++    __half* src; cudaMalloc(&src, N * 2);
++    float* dst; cudaMalloc(&dst, N * 4);
++    vector<__half> hsrc(N);
++    for (int i = 0; i < N; ++i) hsrc[i] = __float2half((i + 1) * 0.5f);
++    cudaMemcpy(src, hsrc.data(), N * 2, cudaMemcpyHostToDevice);
++    tk<<<1, 16>>>(src, dst, ntiles);
++    cudaDeviceSynchronize();
++    vector<float> hdst(N);
++    cudaMemcpy(&hdst[0], dst, N * 4, cudaMemcpyDeviceToHost);
++    int bad = 0;
++    for (int i = 0; i < N; ++i) {
++        float exp = (i + 1) * 0.5f;
++        if (hdst[i] != exp) { if (bad < 10) printf("i=%d got %f exp %f\n", i, hdst[i], exp); ++bad; }
++    }
++    printf("bad=%d\n", bad);
++    return 0;
++}
+diff --git a/dbg_test.py b/dbg_test.py
+new file mode 100644
+index 0000000..31d027f
+--- /dev/null
++++ b/dbg_test.py
+@@ -0,0 +1,30 @@
++import torch, math
++from torch.utils.cpp_extension import load_inline
++
++src = open('attention.cu').read()
++cpp = "torch::Tensor attention_forward(torch::Tensor q, torch::Tensor k, torch::Tensor v, bool causal);"
++mod = load_inline(name='attn_dbg3', cpp_sources=cpp, cuda_sources=src,
++                  functions=['attention_forward'], extra_cuda_cflags=['-O3'], verbose=False)
++
++torch.manual_seed(0)
++def ref(q, k, v, causal):
++    B, H, S, D = q.shape
++    scale = 1.0 / math.sqrt(D)
++    qf, kf, vf = q.float(), k.float(), v.float()
++    s = torch.einsum('bhqd,bhkd->bhqk', qf, kf) * scale
++    if causal:
++        mask = torch.tril(torch.ones(S, S, dtype=torch.bool, device=q.device))
++        s = s.masked_fill(~mask, float('-inf'))
++    p = torch.softmax(s, dim=-1)
++    return torch.einsum('bhqk,bhkd->bhqd', p, vf).bfloat16()
++
++S = 64
++q = torch.randn(1, 1, S, 128, dtype=torch.bfloat16, device='cuda')
++k = torch.randn(1, 1, S, 128, dtype=torch.bfloat16, device='cuda')
++v = torch.randn(1, 1, S, 128, dtype=torch.bfloat16, device='cuda')
++o = mod.attention_forward(q, k, v, False)
++r = ref(q, k, v, False)
++err = (o.float() - r.float()).abs()
++per_row = err.max(dim=-1).values[0, 0]
++for i in range(S):
++    print(f"row {i:3d} err {per_row[i].item():.4f}")
+\ No newline at end of file
