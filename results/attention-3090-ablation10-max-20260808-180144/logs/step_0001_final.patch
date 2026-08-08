@@ -1,0 +1,178 @@
+diff --git a/attention.cu b/attention.cu
+index 3727658..d1e3241 100644
+--- a/attention.cu
++++ b/attention.cu
+@@ -1,8 +1,7 @@
+-// Seed attention forward kernel: FlashAttention-style online softmax, but
+-// deliberately scalar — no tensor cores, no cp.async, no arch-specific
+-// intrinsics — so it compiles for both sm_86 and sm_90a and leaves large
+-// optimization headroom. BF16 in/out, FP32 accumulation.
+-//
++// Attention forward: FlashAttention-style online softmax, scalar (no tensor
++// cores yet). BF16 in/out, FP32 accumulation. Improvements over seed:
++//  - exp2f-based softmax (scale pre-multiplied by log2(e))
++//  - vectorized 16-byte cooperative K/V tile loads into shared memory
+ // Work partitioning: one block per (query tile, batch*head). 4 warps per
+ // block; each warp owns ROWS_PER_WARP query rows; within a row the 32 lanes
+ // cover the head dimension with D_PER_LANE consecutive elements each.
+@@ -22,6 +21,7 @@ constexpr int NUM_WARPS = 4;
+ constexpr int NUM_THREADS = NUM_WARPS * 32;
+ constexpr int ROWS_PER_WARP = BLOCK_M / NUM_WARPS;  // 8
+ constexpr int D_PER_LANE = HEAD_DIM / 32;           // 4
++constexpr float LOG2E = 1.4426950408889634f;
+ 
+ __device__ __forceinline__ float warp_sum(float v) {
+ #pragma unroll
+@@ -35,15 +35,17 @@ __global__ void attention_fwd_kernel(
+     const __nv_bfloat16* __restrict__ k,
+     const __nv_bfloat16* __restrict__ v,
+     __nv_bfloat16* __restrict__ out,
+-    int seq_len, float scale, bool causal)
++    int seq_len, float scale_log2, bool causal, int q_per_kv)
+ {
+     const int m_tile = blockIdx.x;
+     const long long bh = blockIdx.y;  // fused batch*head index
++    const long long bhkv = bh / q_per_kv;
+     const int warp = threadIdx.x / 32;
+     const int lane = threadIdx.x % 32;
+     const int d0 = lane * D_PER_LANE;
+ 
+     const long long base = bh * (long long)seq_len * HEAD_DIM;
++    const long long base_kv = bhkv * (long long)seq_len * HEAD_DIM;
+ 
+     __shared__ __nv_bfloat16 sK[BLOCK_N][HEAD_DIM];
+     __shared__ __nv_bfloat16 sV[BLOCK_N][HEAD_DIM];
+@@ -71,18 +73,25 @@ __global__ void attention_fwd_kernel(
+     int n_tiles = (seq_len + BLOCK_N - 1) / BLOCK_N;
+     if (causal) n_tiles = min(n_tiles, row_hi / BLOCK_N + 1);
+ 
++    // 16-byte vectorized K/V tile load: BLOCK_N*HEAD_DIM/8 = 1024 vecs.
++    const int kV_vecs = BLOCK_N * HEAD_DIM / 8;
++    const __nv_bfloat16* kk = k + base_kv;
++    const __nv_bfloat16* vv = v + base_kv;
++
+     for (int nt = 0; nt < n_tiles; ++nt) {
+-        // Cooperative K/V tile load into shared memory.
+-        for (int idx = threadIdx.x; idx < BLOCK_N * HEAD_DIM; idx += NUM_THREADS) {
+-            const int row = idx / HEAD_DIM;
+-            const int col = idx % HEAD_DIM;
++#pragma unroll
++        for (int vec = 0; vec < kV_vecs / NUM_THREADS; ++vec) {
++            const int idx = vec * NUM_THREADS + threadIdx.x;
++            const int row = idx / (HEAD_DIM / 8);
++            const int col8 = (idx % (HEAD_DIM / 8)) * 8;
+             const int grow_kv = nt * BLOCK_N + row;
+             if (grow_kv < seq_len) {
+-                sK[row][col] = k[base + (long long)grow_kv * HEAD_DIM + col];
+-                sV[row][col] = v[base + (long long)grow_kv * HEAD_DIM + col];
++                const long long off = (long long)grow_kv * HEAD_DIM + col8;
++                *(uint4*)(&sK[row][col8]) = *(const uint4*)(kk + off);
++                *(uint4*)(&sV[row][col8]) = *(const uint4*)(vv + off);
+             } else {
+-                sK[row][col] = __float2bfloat16(0.f);
+-                sV[row][col] = __float2bfloat16(0.f);
++                *(uint4*)(&sK[row][col8]) = make_uint4(0, 0, 0, 0);
++                *(uint4*)(&sV[row][col8]) = make_uint4(0, 0, 0, 0);
+             }
+         }
+         __syncthreads();
+@@ -99,12 +108,12 @@ __global__ void attention_fwd_kernel(
+ #pragma unroll
+                 for (int j = 0; j < D_PER_LANE; ++j)
+                     partial += q_reg[r][j] * __bfloat162float(sK[c][d0 + j]);
+-                const float s = warp_sum(partial) * scale;
++                const float s = warp_sum(partial) * scale_log2;
+ 
+-                // Online softmax at column granularity (tile size 1).
++                // Online softmax at column granularity (tile size 1), exp2.
+                 const float m_new = fmaxf(row_max[r], s);
+-                const float corr = expf(row_max[r] - m_new);  // exp(-inf)=0 first col
+-                const float p = expf(s - m_new);
++                const float corr = exp2f(row_max[r] - m_new);  // exp(-inf)=0
++                const float p = exp2f(s - m_new);
+                 row_sum[r] = row_sum[r] * corr + p;
+ #pragma unroll
+                 for (int j = 0; j < D_PER_LANE; ++j)
+@@ -138,18 +147,18 @@ torch::Tensor attention_forward(torch::Tensor q, torch::Tensor k,
+                 k.scalar_type() == torch::kBFloat16 &&
+                 v.scalar_type() == torch::kBFloat16, "q/k/v must be bfloat16");
+     TORCH_CHECK(q.dim() == 4, "expected [B, H, S, D]");
+-    TORCH_CHECK(q.sizes() == k.sizes() && q.sizes() == v.sizes(),
+-                "q/k/v shapes must match");
+     TORCH_CHECK(q.size(3) == HEAD_DIM, "head_dim must be ", HEAD_DIM);
+     TORCH_CHECK(q.is_contiguous() && k.is_contiguous() && v.is_contiguous(),
+                 "q/k/v must be contiguous");
+ 
+     const at::cuda::CUDAGuard guard(q.device());
+     const int B = q.size(0), H = q.size(1), S = q.size(2);
++    const int kvH = k.size(1);
++    TORCH_CHECK(H % kvH == 0, "heads must be a multiple of kv_heads");
+     TORCH_CHECK((long long)B * H <= 65535, "B*H exceeds grid.y limit");
+ 
+     auto out = torch::empty_like(q);
+-    const float scale = 1.0f / sqrtf((float)HEAD_DIM);
++    const float scale_log2 = (1.0f / sqrtf((float)HEAD_DIM)) * LOG2E;
+     dim3 grid((S + BLOCK_M - 1) / BLOCK_M, B * H);
+ 
+     attention_fwd_kernel<<<grid, NUM_THREADS, 0,
+@@ -158,7 +167,7 @@ torch::Tensor attention_forward(torch::Tensor q, torch::Tensor k,
+         reinterpret_cast<const __nv_bfloat16*>(k.data_ptr()),
+         reinterpret_cast<const __nv_bfloat16*>(v.data_ptr()),
+         reinterpret_cast<__nv_bfloat16*>(out.data_ptr()),
+-        S, scale, causal);
++        S, scale_log2, causal, H / kvH);
+     C10_CUDA_KERNEL_LAUNCH_CHECK();
+     return out;
+ }
+diff --git a/probe_layout.cu b/probe_layout.cu
+new file mode 100644
+index 0000000..df65099
+--- /dev/null
++++ b/probe_layout.cu
+@@ -0,0 +1,46 @@
++// Probe: ldmatrix mapping with CORRECT addressing (lane l supplies row l).
++#include <cstdio>
++#include <cstdint>
++#include <cuda_bf16.h>
++
++__device__ __forceinline__ uint32_t pack2(float lo, float hi) {
++    union { __nv_bfloat16 bf[2]; uint32_t u; } u;
++    u.bf[0] = __float2bfloat16(lo); u.bf[1] = __float2bfloat16(hi);
++    return u.u;
++}
++
++// Non-trans: 32 rows x 8 cols tile (4 stacked 8x8). T[row][col] = row*8+col (exact in bf16).
++__global__ void ldm_test() {
++    __shared__ __nv_bfloat16 T[32][8];
++    const int lane = threadIdx.x % 32;
++    for (int i = threadIdx.x; i < 256; i += 32) T[i/8][i%8] = __float2bfloat16((float)((i/8)*8 + (i%8)));
++    __syncthreads();
++    uint32_t r[4];
++    uint32_t saddr = (uint32_t)__cvta_generic_to_shared(&T[lane][0]);
++    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
++                 : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]) : "r"(saddr));
++    printf("LDM  lane %2d: r0=(%u,%u) r1=(%u,%u) r2=(%u,%u) r3=(%u,%u)\n",
++           lane, r[0]&0xffff, r[0]>>16, r[1]&0xffff, r[1]>>16, r[2]&0xffff, r[2]>>16, r[3]&0xffff, r[3]>>16);
++}
++
++// Trans: 32 rows x 8 cols.
++__global__ void ldm_t_test() {
++    __shared__ __nv_bfloat16 T[32][8];
++    const int lane = threadIdx.x % 32;
++    for (int i = threadIdx.x; i < 256; i += 32) T[i/8][i%8] = __float2bfloat16((float)((i/8)*8 + (i%8)));
++    __syncthreads();
++    uint32_t r[4];
++    uint32_t saddr = (uint32_t)__cvta_generic_to_shared(&T[lane][0]);
++    asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0,%1,%2,%3}, [%4];\n"
++                 : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]) : "r"(saddr));
++    printf("LDMT lane %2d: r0=(%u,%u) r1=(%u,%u) r2=(%u,%u) r3=(%u,%u)\n",
++           lane, r[0]&0xffff, r[0]>>16, r[1]&0xffff, r[1]>>16, r[2]&0xffff, r[2]>>16, r[3]&0xffff, r[3]>>16);
++}
++
++int main() {
++    ldm_test<<<1, 32>>>();
++    cudaDeviceSynchronize();
++    ldm_t_test<<<1, 32>>>();
++    cudaDeviceSynchronize();
++    return 0;
++}

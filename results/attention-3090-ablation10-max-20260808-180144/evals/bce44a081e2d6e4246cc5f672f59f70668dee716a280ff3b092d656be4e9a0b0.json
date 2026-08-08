@@ -1,0 +1,35 @@
+{
+ "correct": true,
+ "score": 0.0,
+ "error": null,
+ "configs": [],
+ "meta": {
+  "summary": "ncu profile of config {'batch': 8, 'heads': 16, 'kv_heads': 16, 'seqlen': 1024, 'head_dim': 128, 'causal': False} (one launch, after warmup):\n\n## void unnamed>::distribution_elementwise_grid_stride_kernel<float, 4, void normal_and_transform<BFloat16, float, CUDAGene\n  duration                   77,536 ns\n  compute_sol_pct            73.55 %\n  memory_sol_pct             42.86 %\n  dram_sol_pct               42.86 %\n  achieved_occupancy_pct     68.20 %\n  theoretical_occupancy_pct  100 %\n  registers_per_thread       40 register/thread\n  static_smem_per_block      0 byte/block\n  dynamic_smem_per_block     0 byte/block\n  grid                       504\n  block                      256\n  waves_per_sm               1\n\nReading: compute_sol vs memory_sol tells you the bound (both low => latency/occupancy bound). Low achieved vs theoretical occupancy => launch config or register pressure. High registers_per_thread with spills => rebalance or reduce live state.",
+  "metrics": {
+   "void unnamed>::distribution_elementwise_grid_stride_kernel<float, 4, void normal_and_transform<BFloat16, float, CUDAGeneratorImpl *, void normal_kernel<CUDAGeneratorImpl *>(const TensorBase &, double, double, T1)::[lambda() (instance 1)]::operator ()() lambda() (instance 4)]::operator ()() lambda(float) (instance 1)]>(TensorIteratorBase &, T3, T4)::[lambda(curandStatePhilox4_32_10 *) (instance 2)], void unnamed>::distribution_nullary_kernel<BFloat16, float, float4, CUDAGeneratorImpl *, void normal_and_transform<BFloat16, float, CUDAGeneratorImpl *, void normal_kernel<CUDAGeneratorImpl *>(const TensorBase &, double, double, T1)::[lambda() (instance 1)]::operator ()() lambda() (instance 4)]::operator ()() lambda(float) (instance 1)]>(TensorIteratorBase &, T3, T4)::[lambda(curandStatePhilox4_32_10 *) (instance 2)], void normal_kernel<CUDAGeneratorImpl *>(const TensorBase &, double, double, T1)::[lambda() (instance 1)]::operator ()() lambda() (instance 4)]::operator ()() lambda(float) (instance 1)]>(TensorIteratorBase &, T4, const T5 &, T6)::[lambda(int, float) (instance 1)]>(long, PhiloxCudaState, T3, T4)": {
+    "memory_sol_pct": "42.86 %",
+    "dram_sol_pct": "42.86 %",
+    "duration": "77,536 ns",
+    "compute_sol_pct": "73.55 %",
+    "block": "256",
+    "grid": "504",
+    "registers_per_thread": "40 register/thread",
+    "dynamic_smem_per_block": "0 byte/block",
+    "static_smem_per_block": "0 byte/block",
+    "waves_per_sm": "1",
+    "theoretical_occupancy_pct": "100 %",
+    "achieved_occupancy_pct": "68.20 %"
+   }
+  },
+  "profiled_config": {
+   "batch": 8,
+   "heads": 16,
+   "kv_heads": 16,
+   "seqlen": 1024,
+   "head_dim": 128,
+   "causal": false
+  }
+ },
+ "eval_hash": "bce44a081e2d6e4246cc5f672f59f70668dee716a280ff3b092d656be4e9a0b0",
+ "cached": false
+}
