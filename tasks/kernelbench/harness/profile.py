@@ -70,9 +70,11 @@ def dev_time(evt):
             return float(v)
     return 0.0
 
+SKIP_OPS = ("Activity Buffer Request", "cudaDeviceSynchronize", "cudaLaunchKernel")
 ops = sorted(({"name": e.key[:120], "device_us": round(dev_time(e), 1),
                "calls": e.count}
-              for e in prof.key_averages() if dev_time(e) > 0),
+              for e in prof.key_averages()
+              if dev_time(e) > 0 and e.key not in SKIP_OPS),
              key=lambda r: -r["device_us"])
 kernels = {}
 for e in prof.events():
