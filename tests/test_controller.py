@@ -185,9 +185,12 @@ def test_auto_profile_champion_injected_into_next_step(project):
     ctrl = Controller(cfg, llm, project_root=project)
     ctrl.run(log=lambda *a: None)
     assert "compute-bound at 11% SOL" in ctrl.state.get("champion_profile", "")
-    step2_prompts = [m.text() for c in llm.calls for m in c["messages"][:1]
-                     if "Profile of the best committed version" in m.text()]
-    assert step2_prompts, "champion profile was not injected into step 2"
+    profiled_prompts = [m.text() for c in llm.calls for m in c["messages"][:1]
+                        if "Profile of the best committed version" in m.text()]
+    assert profiled_prompts, "champion profile was not injected"
+    # the SEED is profiled too: the very first step prompt already carries it
+    first_prompt = llm.calls[0]["messages"][0].text()
+    assert "Profile of the best committed version" in first_prompt
 
 
 def test_run_dir_lock_rejects_second_controller(project):

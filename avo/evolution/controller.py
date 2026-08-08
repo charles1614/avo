@@ -209,6 +209,9 @@ class Controller:
                 raise RuntimeError(f"seed fails its own scoring: {seed.brief()}")
             self.lineage.record_seed(seed.score, seed.eval_hash or "")
             log(f"[avo] seed committed as v0000, score={seed.score:.4f}")
+            # the seed is the first champion: profile it so even step 1
+            # starts from a diagnosis instead of guessing the bottleneck
+            self._auto_profile_champion(log)
 
         while True:
             stop = self._stop_reason()
