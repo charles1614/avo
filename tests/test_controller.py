@@ -83,7 +83,7 @@ def test_full_run_two_commits(project):
     assert summary["usd"] > 0
 
 
-def test_failed_step_resets_workspace_and_records_summary(project):
+def test_failed_step_persists_workspace_and_records_summary(project):
     script = [
         # step 1: regress to 0.5, submit rejected, then run out of turns
         [set_value("0.5")],
@@ -91,11 +91,9 @@ def test_failed_step_resets_workspace_and_records_summary(project):
         [TextBlock("hmm")],
         # failure-summary LLM call answers:
         [TextBlock("tried 0.5; rejected as regression; try larger values")],
-        # step 2: do it right
+        # step 2: the failed attempt is STILL in the workspace (persistence);
+        # fix it in place and submit
         [set_value("5.0")], [tool_use("submit", "s2", message="bump to 5")],
-        # step 3+: nothing useful; failure summary again
-        [TextBlock("idle")], [TextBlock("idle")], [TextBlock("idle")],
-        [TextBlock("no attempt made")],
     ]
     cfg = make_config(budgets={"max_versions": 1, "max_steps": 2,
                                "max_turns_per_step": 3, "max_evals_per_step": 4,
@@ -105,13 +103,32 @@ def test_failed_step_resets_workspace_and_records_summary(project):
     summary = ctrl.run(log=lambda *a: None)
 
     assert summary["versions"] == 1 and summary["best_score"] == 5.0
-    # workspace was reset after the failed step before step 2 started
     assert (ctrl.lineage.workspace / "value.txt").read_text() == "5.0"
-    # failure patch + summary recorded
+    # failure patch + summary recorded; dirty flag was set then cleared
     patches = list((ctrl.run_dir / "logs").glob("step_*_final.patch"))
-    assert patches, "failed step should leave a patch"
+    assert patches, "failed step should leave a patch snapshot"
     state = json.loads((ctrl.run_dir / "state.json").read_text())
-    assert state["steps_done"] >= 1
+    assert state["steps_done"] >= 1 and state["workspace_dirty"] is False
+    # step 2's prompt announced the persisted uncommitted work
+    step2 = [m.text() for c in llm.calls for m in c["messages"][:1]
+             if "UNCOMMITTED work" in m.text()]
+    assert step2, "workspace-dirty note missing from step 2 prompt"
+
+
+def test_revert_tool_discards_uncommitted_work(project):
+    script = [
+        [set_value("0.5")],                      # regress
+        [tool_use("revert", "r1")],              # back out deliberately
+        [tool_use("submit", "s1", message="seed unchanged")],  # tie -> commit? no changes -> commit fails
+        [TextBlock("summary of the failed step")],
+    ]
+    cfg = make_config(budgets={"max_versions": 1, "max_steps": 1,
+                               "max_turns_per_step": 3, "max_evals_per_step": 4,
+                               "max_usd": 10.0, "max_total_tokens": 100000})
+    ctrl = Controller(cfg, FakeLLM(script), project_root=project)
+    ctrl.run(log=lambda *a: None)
+    # revert restored the seed content
+    assert (ctrl.lineage.workspace / "value.txt").read_text() == "1.0\n"
 
 
 def test_resume_continues_without_duplicates(project):

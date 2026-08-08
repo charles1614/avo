@@ -38,6 +38,10 @@ correct AND score >= {best_score:.4f} (the current best committed score).
 - `evaluate` is the ONLY environment that counts. Never build a parallel test
   or benchmark setup with the system Python/torch — its results will not match
   the scoring environment, and time spent there is wasted.
+- Your workspace PERSISTS across steps: failed attempts stay in place (only
+  `submit` advances the committed lineage). Continue promising unfinished
+  work; call `revert` to discard everything uncommitted when a direction is
+  a dead end. `git status` / `git diff HEAD` work in the shell.
 - Workspace hygiene: delete scratch/probe/bench files before `submit` — the
   commit should contain only files the solution needs (stray .cu files are
   compiled into the module; stray files pollute the lineage).
@@ -115,16 +119,19 @@ def build_system_prompt(brief: str, best_score: float, max_turns: int,
 
 def build_step_prompt(entries: list[LineageEntry], last_diff: str,
                       prev_outcome: str, supervisor_guidance: str,
-                      prev_patch: str = "", champion_profile: str = "") -> str:
+                      workspace_dirty: bool = False,
+                      champion_profile: str = "") -> str:
     best = max(entries, key=lambda e: e.score) if entries else None
     sup = ""
     if supervisor_guidance:
         sup = f"\n## SUPERVISOR GUIDANCE\n{supervisor_guidance}\n\n"
     patch = ""
-    if prev_patch.strip():
-        patch = ("\n### Uncommitted diff of that failed attempt "
-                 "(reusable starting material — the workspace was reset)\n"
-                 f"```diff\n{prev_patch}\n```\n")
+    if workspace_dirty:
+        patch = ("\n### Workspace status\nThe workspace still contains "
+                 "UNCOMMITTED work from previous attempt(s). Inspect it with "
+                 "`git status` / `git diff HEAD` (shell), then continue it, "
+                 "fix it, or call `revert` to return to the best committed "
+                 "version.\n")
     prof = ""
     if champion_profile.strip():
         prof = ("\n## Profile of the best committed version (ncu)\n"

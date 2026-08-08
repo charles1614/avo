@@ -117,17 +117,17 @@ class Controller:
 
         if self.resuming:
             self.lineage = Lineage.load(self.run_dir)
-            # an interrupted step's uncommitted work is starting material for
-            # the next attempt — capture it before the reset discards it
+            # uncommitted work REMAINS in the workspace (the paper keeps
+            # failed attempts in the search trajectory); snapshot for logs
             patch = self.lineage.capture_uncommitted_patch()
             if patch.strip():
                 interrupted = self.state["steps_done"] + 1
                 (self.logs_dir / f"step_{interrupted:04d}_final.patch"
                  ).write_text(patch)
+                self.state["workspace_dirty"] = True
                 self.state["failure_summaries"].append(
-                    f"step {interrupted}: interrupted by a restart before it "
-                    "could finish; its uncommitted diff is provided below.")
-            self.lineage.reset_workspace()
+                    f"step {interrupted}: interrupted by a restart; its "
+                    "uncommitted work remains in the workspace.")
         else:
             (self.run_dir / "config.yaml").write_text(
                 json.dumps(json.loads(config.model_dump_json()), indent=1))
@@ -222,6 +222,7 @@ class Controller:
             if result.committed:
                 self.state["stagnation"] = 0
                 self.state["failure_summaries"] = []
+                self.state["workspace_dirty"] = False
                 self.supervisor.note_commit()
                 self._auto_profile_champion(log)
             else:
@@ -278,6 +279,7 @@ class Controller:
             submit_fn=lambda msg: self._submit(step, msg, log),
             runner=self.runner if self.config.runner.kind == "ssh" else None,
             profile_fn=self.profile_workspace if self._has_profiler else None,
+            revert_fn=lambda: self._revert_workspace(log),
             max_evals=self.config.budgets.max_evals_per_step,
         )
         registry = ToolRegistry(ctx)
@@ -293,21 +295,10 @@ class Controller:
             self.config.gpu_sheet)
         prev = (self.state["failure_summaries"][-1]
                 if self.state["failure_summaries"] else "")
-        prev_patch = ""
-        if prev:  # a failed or interrupted attempt left a diff to build on:
-            # this step's own patch exists when it was interrupted mid-attempt,
-            # otherwise fall back to the previous step's failed attempt
-            for candidate in (f"step_{step:04d}_final.patch",
-                              f"step_{step - 1:04d}_final.patch"):
-                patch_file = self.logs_dir / candidate
-                if patch_file.exists():
-                    # tensor-core kernel diffs run 15-25 KB; truncating the
-                    # carried patch forces each step to reconstruct the rest
-                    prev_patch = patch_file.read_text()[:28_000]
-                    break
         step_prompt = build_step_prompt(
             self.lineage.entries(), self.lineage.last_commit_diff(),
-            prev, guidance, prev_patch=prev_patch,
+            prev, guidance,
+            workspace_dirty=self.state.get("workspace_dirty", False),
             champion_profile=self.state.get("champion_profile", ""))
 
         log(f"[avo] step {step}: starting variation (best={best_score:.4f})")
@@ -324,13 +315,23 @@ class Controller:
             f"{result.evals_used} evals, ${self.budget.usd:.2f} spent")
 
         if not result.committed:
+            # snapshot the attempt for forensics, but DO NOT reset: failed
+            # attempts stay in the workspace as the agent's search trajectory
+            # (paper-faithful); the agent can `revert` deliberately
             patch = self.lineage.capture_uncommitted_patch()
             if patch.strip():
                 (self.logs_dir / f"step_{step:04d}_final.patch").write_text(patch)
+                self.state["workspace_dirty"] = True
             summary = self._failure_summary(patch, result.last_eval_brief)
             self.state["failure_summaries"].append(f"step {step}: {summary}")
-            self.lineage.reset_workspace()
         return result
+
+    def _revert_workspace(self, log) -> str:
+        self.lineage.reset_workspace()
+        self.state["workspace_dirty"] = False
+        log("[avo] workspace reverted to the best committed version")
+        return ("workspace reset to the best committed version; all "
+                "uncommitted changes discarded")
 
     def _submit(self, step: int, message: str, log) -> tuple[bool, str]:
         result = self.evaluate_workspace()

@@ -56,6 +56,7 @@ class ToolContext:
     submit_fn: Callable[[str], "tuple[bool, str]"]
     runner: Runner | None = None  # SSH runner => gpu_shell available
     profile_fn: Callable[..., ScoreResult] | None = None  # task ships profile.py
+    revert_fn: Callable[[], str] | None = None  # discard uncommitted work
     shell_timeout_s: int = 60
     gpu_shell_timeout_s: int = 120
     evals_used: int = 0
@@ -127,6 +128,10 @@ class ToolRegistry:
                   "version if it is correct AND matches-or-improves the best committed score. "
                   "message = concise description of the change (used as commit message).",
                   {"message": {"type": "string"}}, ["message"]),
+            _spec("revert",
+                  "Discard ALL uncommitted changes and reset the workspace to the best "
+                  "committed version. Use when the current line of work is a dead end.",
+                  {}, []),
         ]
         if self.ctx.profile_fn is not None:
             s.insert(-1, _spec(
@@ -308,6 +313,11 @@ class ToolRegistry:
         summary = result.meta.get("summary", "(no profile summary)")
         return ToolOutcome(truncate_middle(summary, OUTPUT_CAP)
                            + f"\n[evals remaining this step: {self._budget_left()}]")
+
+    def _t_revert(self) -> ToolOutcome:
+        if self.ctx.revert_fn is None:
+            return ToolOutcome("revert not available", is_error=True)
+        return ToolOutcome(self.ctx.revert_fn())
 
     def _t_submit(self, message: str) -> ToolOutcome:
         if self._budget_left() <= 0:
