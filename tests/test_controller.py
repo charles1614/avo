@@ -138,6 +138,41 @@ def test_resume_continues_without_duplicates(project):
     assert summary["tokens"] > FakeLLM([]).usage.total_tokens
 
 
+PROFILE_HARNESS = textwrap.dedent("""\
+    import argparse, json
+    from pathlib import Path
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--workspace", required=True)
+    ap.add_argument("--params-b64", required=True)
+    ap.add_argument("--out", required=True)
+    a = ap.parse_args()
+    Path(a.out).write_text(json.dumps(
+        {"correct": True, "score": 0.0, "error": None, "configs": [],
+         "meta": {"summary": "champion is compute-bound at 11% SOL"}}))
+""")
+
+
+def test_auto_profile_champion_injected_into_next_step(project):
+    (project / "tasks" / "value" / "harness" / "profile.py").write_text(
+        PROFILE_HARNESS)
+    script = [
+        [set_value("2.0")], [tool_use("submit", "s1", message="bump to 2")],
+        # step 2 fails (text-only), then the failure-summary call answers
+        [TextBlock("idle")], [TextBlock("idle")], [TextBlock("idle")],
+        [TextBlock("no attempt")],
+    ]
+    cfg = make_config(budgets={"max_versions": 2, "max_steps": 2,
+                               "max_turns_per_step": 3, "max_evals_per_step": 4,
+                               "max_usd": 10.0, "max_total_tokens": 100000})
+    llm = FakeLLM(script)
+    ctrl = Controller(cfg, llm, project_root=project)
+    ctrl.run(log=lambda *a: None)
+    assert "compute-bound at 11% SOL" in ctrl.state.get("champion_profile", "")
+    step2_prompts = [m.text() for c in llm.calls for m in c["messages"][:1]
+                     if "Profile of the best committed version" in m.text()]
+    assert step2_prompts, "champion profile was not injected into step 2"
+
+
 def test_run_dir_lock_rejects_second_controller(project):
     script = [[set_value("2.0")], [tool_use("submit", "s1", message="b2")]]
     ctrl = Controller(make_config(), FakeLLM(script), project_root=project)

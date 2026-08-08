@@ -106,6 +106,8 @@ class Controller:
         self.kb = KnowledgeBase([self.root / d for d in config.kb_dirs])
         self.supervisor = Supervisor(config.supervisor,
                                      self.logs_dir / "supervisor.jsonl")
+        self._has_profiler = (self.task_dir / self.task.harness_dir
+                              / "profile.py").exists()
         self.state = self._load_state()
         self.budget = BudgetTracker(
             config, llm,
@@ -221,6 +223,7 @@ class Controller:
                 self.state["stagnation"] = 0
                 self.state["failure_summaries"] = []
                 self.supervisor.note_commit()
+                self._auto_profile_champion(log)
             else:
                 self.state["stagnation"] += 1
             self._save_state()
@@ -248,19 +251,33 @@ class Controller:
             self.state["failure_summaries"], self._source_snapshot(), reason)
         return guidance
 
+    def _auto_profile_champion(self, log) -> None:
+        """Profile each new champion once (GPU-only, cached); the summary is
+        injected into subsequent step prompts so every attempt starts from a
+        diagnosis of the current best — the paper's 'profiling
+        characteristics of prior implementations'."""
+        if not (self.config.auto_profile and self._has_profiler):
+            return
+        log("[avo] profiling new champion ...")
+        result = self.profile_workspace()
+        if result.correct and result.meta.get("summary"):
+            self.state["champion_profile"] = result.meta["summary"][:6000]
+        else:
+            log("[avo] champion profile unavailable: "
+                f"{(result.error or {}).get('detail', '')[:120]}")
+
     def _run_step(self, step: int, guidance: str, log):
         best = self.lineage.best()
         best_score = best.score if best else 0.0
         transcript = Transcript(self.logs_dir / f"step_{step:04d}.jsonl")
 
-        has_profiler = (self.task_dir / self.task.harness_dir / "profile.py").exists()
         ctx = ToolContext(
             workspace=self.lineage.workspace,
             kb=self.kb,
             evaluate_fn=self.evaluate_workspace,
             submit_fn=lambda msg: self._submit(step, msg, log),
             runner=self.runner if self.config.runner.kind == "ssh" else None,
-            profile_fn=self.profile_workspace if has_profiler else None,
+            profile_fn=self.profile_workspace if self._has_profiler else None,
             max_evals=self.config.budgets.max_evals_per_step,
         )
         registry = ToolRegistry(ctx)
@@ -288,9 +305,10 @@ class Controller:
                     # carried patch forces each step to reconstruct the rest
                     prev_patch = patch_file.read_text()[:28_000]
                     break
-        step_prompt = build_step_prompt(self.lineage.entries(),
-                                        self.lineage.last_commit_diff(),
-                                        prev, guidance, prev_patch=prev_patch)
+        step_prompt = build_step_prompt(
+            self.lineage.entries(), self.lineage.last_commit_diff(),
+            prev, guidance, prev_patch=prev_patch,
+            champion_profile=self.state.get("champion_profile", ""))
 
         log(f"[avo] step {step}: starting variation (best={best_score:.4f})")
         try:

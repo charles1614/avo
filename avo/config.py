@@ -87,6 +87,9 @@ class RunConfig(BaseModel):
     # Override the task's seed directory, e.g. to seed a GQA-adaptation run
     # from a previous run's evolved kernel (paper's transfer experiment).
     seed_dir: str | None = None
+    # After each commit, profile the new champion once and inject the summary
+    # into subsequent step prompts (tasks with harness/profile.py only).
+    auto_profile: bool = True
 
 
 class TaskSpec(BaseModel):

@@ -53,7 +53,7 @@ Current best committed score: {best_score:.4f} ({best_version})
 
 ## Diff of the last committed version
 {last_diff}
-
+{champion_profile_block}\
 ## Previous step outcome
 {prev_outcome}
 {prev_patch_block}{supervisor_block}\
@@ -115,7 +115,7 @@ def build_system_prompt(brief: str, best_score: float, max_turns: int,
 
 def build_step_prompt(entries: list[LineageEntry], last_diff: str,
                       prev_outcome: str, supervisor_guidance: str,
-                      prev_patch: str = "") -> str:
+                      prev_patch: str = "", champion_profile: str = "") -> str:
     best = max(entries, key=lambda e: e.score) if entries else None
     sup = ""
     if supervisor_guidance:
@@ -125,6 +125,10 @@ def build_step_prompt(entries: list[LineageEntry], last_diff: str,
         patch = ("\n### Uncommitted diff of that failed attempt "
                  "(reusable starting material — the workspace was reset)\n"
                  f"```diff\n{prev_patch}\n```\n")
+    prof = ""
+    if champion_profile.strip():
+        prof = ("\n## Profile of the best committed version (ncu)\n"
+                f"{champion_profile}\n\n")
     return STEP_USER.format(
         lineage_table=lineage_table(entries),
         best_score=best.score if best else 0.0,
@@ -132,5 +136,6 @@ def build_step_prompt(entries: list[LineageEntry], last_diff: str,
         last_diff=last_diff or "(seed version — no diff yet)",
         prev_outcome=prev_outcome or "(this is the first variation step)",
         prev_patch_block=patch,
+        champion_profile_block=prof,
         supervisor_block=sup,
     )
