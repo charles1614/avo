@@ -130,16 +130,24 @@ lock without consuming its own timeout, and a crashed holder releases the
 lock automatically. Waits longer than 2×`eval_timeout_s` fail structured and
 non-cached, so the agent simply retries.
 
-**Filesystem isolation is REQUIRED for multi-route integrity.** Without it,
-an agent's `shell`/`gpu_shell` can `cat`/`git show`/`cp` a peer route's
-workspace, lineage, and git history (a regex deny-list cannot stop this), and
-can read anything in a shared `/tmp`. `runner.sandbox` (default `auto`) runs
-each shell inside a bubblewrap namespace that blanks the whole `runs/` tree
-and re-exposes only the calling route's workspace, with a private `/tmp`.
-Install bubblewrap on every GPU host (`apt install bubblewrap`); with it
-absent, `auto` falls back to no isolation and the run prints a loud warning —
-safe for a single route only. `sandbox: bwrap` hard-requires it. (Ubuntu 24.04
-also needs `sysctl kernel.apparmor_restrict_unprivileged_userns=0`.)
+**Filesystem isolation is REQUIRED for multi-route integrity** — without it an
+agent's `shell` can read a peer route's workspace, lineage and git history, or
+bootstrap from residue in a shared `/tmp` (both observed in the field; a
+deny-list cannot prevent it, since the shell is a full language).
+`runner.sandbox` picks the mechanism:
+
+| mode | isolates by | requires |
+|---|---|---|
+| `bwrap` | mount namespace: blanks `runs/`, re-exposes only this workspace, private `/tmp` | user namespaces / `CAP_SYS_ADMIN` |
+| `uid` | per-route unprivileged uid + `0700` run dirs + private `TMPDIR` | root **inside** the container — no capabilities, no userns |
+| `require` | strongest available, else **aborts the run** | — |
+| `none` | nothing (single-route only) | — |
+
+Check what a host supports with `python scripts/check_isolation.py`, use
+`sandbox: require` for any comparative experiment, and audit results with
+`avo audit --run <dir>` — every run also self-reports a contamination verdict
+in `summary.json`. Full detail, incidents and rejected approaches:
+**[docs/isolation.md](docs/isolation.md)**.
 
 **Serial and parallel are both supported, per config**, by choosing what the
 lock is keyed on:
@@ -194,6 +202,7 @@ problems allocate >18 GiB — sized for 80 GB cards; they fail gracefully
 | `avo baselines` | benchmark SDPA/flash-attn on the task grid | none |
 | `avo dashboard` | self-contained live HTML dashboard (`--watch`, `--open`) | none |
 | `avo report` / `avo rebench` | lineage plot · re-score all versions, mean±std | none |
+| `avo audit` | detect cross-route / shared-`/tmp` contamination in a run | none |
 | `avo export` | package a run into committable `results/` | none |
 
 **Cost safety is structural**: only `run`, `resume`, and `llm_smoke.py` can reach an LLM API, all three require `--confirm-spend`, and every run is capped by `max_usd` (from API-reported usage × configured prices) plus a `max_total_tokens` backstop, per-step turn/eval budgets, and wall-clock limits. Keys come from environment variables only.
