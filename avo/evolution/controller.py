@@ -201,7 +201,35 @@ class Controller:
 
     # -- main loop -----------------------------------------------------------------
 
+    def _preflight(self, log) -> None:
+        """Loud startup warnings for the two silent-integrity failures:
+        unavailable shell isolation and a knowledge base that was promised
+        but never fetched."""
+        # 1. filesystem isolation for agent shell (local runner only; ssh
+        #    resolves lazily on first gpu_shell)
+        if self.config.runner.kind == "local":
+            from avo.agent.sandbox import bwrap_works
+            mode = self.config.runner.sandbox
+            if mode == "none" or (mode == "auto" and not bwrap_works()):
+                log("[avo] WARNING: shell filesystem isolation is OFF (bwrap "
+                    "unavailable or sandbox=none). Agents can read/copy peer "
+                    "routes' workspaces and a shared /tmp. Safe for a SINGLE "
+                    "route only; install bubblewrap for multi-route runs.")
+        # 2. knowledge base: manifest entries actually present on disk?
+        manifest = self.root / "knowledge_base" / "external" / "MANIFEST.json"
+        if manifest.exists():
+            entries = json.loads(manifest.read_text())
+            missing = [n for n in entries
+                       if not (self.root / "knowledge_base" / "external"
+                               / n.split("/")[0]).exists()]
+            if missing:
+                log(f"[avo] WARNING: knowledge-base sources in MANIFEST are "
+                    f"NOT on disk: {missing}. The task brief may promise "
+                    "references the agent cannot see. Run: "
+                    "python scripts/fetch_kb.py --from-manifest")
+
     def run(self, log=print) -> dict:
+        self._preflight(log)
         if not self.lineage.entries():
             log("[avo] evaluating seed ...")
             seed = self.evaluate_workspace()
@@ -286,6 +314,8 @@ class Controller:
             runner=self.runner if self.config.runner.kind == "ssh" else None,
             profile_fn=self.profile_workspace if self._has_profiler else None,
             revert_fn=lambda: self._revert_workspace(log),
+            sandbox=self.config.runner.sandbox,
+            runs_dir=(self.root / self.config.runs_dir).resolve(),
             max_evals=self.config.budgets.max_evals_per_step,
         )
         registry = ToolRegistry(ctx)

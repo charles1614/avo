@@ -130,6 +130,16 @@ lock without consuming its own timeout, and a crashed holder releases the
 lock automatically. Waits longer than 2×`eval_timeout_s` fail structured and
 non-cached, so the agent simply retries.
 
+**Filesystem isolation is REQUIRED for multi-route integrity.** Without it,
+an agent's `shell`/`gpu_shell` can `cat`/`git show`/`cp` a peer route's
+workspace, lineage, and git history (a regex deny-list cannot stop this), and
+can read anything in a shared `/tmp`. `runner.sandbox` (default `auto`) runs
+each shell inside a bubblewrap namespace that blanks the whole `runs/` tree
+and re-exposes only the calling route's workspace, with a private `/tmp`.
+Install bubblewrap on every GPU host (`apt install bubblewrap`); with it
+absent, `auto` falls back to no isolation and the run prints a loud warning —
+safe for a single route only. `sandbox: bwrap` hard-requires it.
+
 ## KernelBench campaigns
 
 [KernelBench](https://github.com/ScalingIntelligence/KernelBench) (ICML'25,

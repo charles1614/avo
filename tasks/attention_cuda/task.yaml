@@ -18,13 +18,22 @@ brief: |
   create `build_flags.json` with {"extra_cuda_cflags": [...]} — allowed flags:
   -O0..-O3, --use_fast_math, -lineinfo, --maxrregcount=N, -Xptxas..., -D<name>[=v].
 
-  Scoring: compile, then numerical correctness versus an FP32 reference on
-  randomized inputs (tolerance = 2x the intrinsic BF16 error floor + 1e-3; any
-  failure scores 0), then TFLOPS benchmarked with CUDA events across a fixed
-  grid of (seqlen, batch, causal) configs; score = geometric mean TFLOPS.
-  FLOP convention: 4*B*H*S^2*D, halved for causal.
+  You must IMPLEMENT the attention kernel yourself. Delegating to a pre-built
+  fused attention op is forbidden and scores 0 — banned symbols include
+  scaled_dot_product_attention, any cuDNN/flash-attn/xformers/mem-efficient
+  attention entry point. Composing attention from GEMM primitives (cuBLAS,
+  CUTLASS) is allowed; the point is that YOU write the attention algorithm.
+
+  Scoring: source scan for banned APIs, compile, then numerical correctness
+  versus an FP32 reference on randomized inputs (tolerance = 2x the intrinsic
+  BF16 error floor + 1e-3; any failure scores 0), then TFLOPS benchmarked with
+  CUDA events across a fixed grid of (seqlen, batch, causal) configs; score =
+  geometric mean TFLOPS. FLOP convention: 4*B*H*S^2*D, halved for causal.
 
   The knowledge base has CUDA/arch tuning guides, online-softmax and
-  FlashAttention algorithm notes, PTX mma examples, and (if fetched) the
-  FlashAttention-2 sources. The seed kernel is deliberately scalar — tensor
-  cores, cp.async / TMA, better tiling, and softmax restructuring are all open.
+  FlashAttention algorithm notes, and PTX mma examples. FlashAttention-2/3 and
+  CUTLASS/CuTe sources are present ONLY if fetched (run
+  `python scripts/fetch_kb.py --from-manifest`); check knowledge_base/external/
+  with kb_search before relying on them. The seed kernel is deliberately
+  scalar — tensor cores, cp.async / TMA, better tiling, and softmax
+  restructuring are all open.

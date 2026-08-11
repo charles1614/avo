@@ -44,6 +44,17 @@ python scripts/run_kernelbench.py --config configs/kernelbench_h100.yaml \
    instances (timing accuracy + memory), LLM turns overlap. The lock is
    acquired before the eval's timeout clock starts. Don't remove it, and
    keep one shared path per GPU.
+8. **Multi-route filesystem integrity depends on `runner.sandbox`** (bwrap):
+   shell/gpu_shell run in a namespace that blanks `runs/` and re-exposes only
+   the calling workspace + a private /tmp. A deny-list alone CANNOT isolate
+   routes (shell is a full language) — observed: agents copying peers'
+   solutions. Needs bubblewrap on the host; `auto` warns and degrades if absent.
+9. **Task scoring must forbid delegating to the thing being optimized.** The
+   attention harness scans source for fused-attention APIs
+   (`tasks/attention_cuda/harness/checks.py`) and scores 0 — else an agent
+   calls SDPA/cuDNN and measures the library, not itself. New kernel tasks
+   need the analogous ban. (KernelBench is exempt: better library calls are a
+   legitimate optimization there.)
 
 ## Architecture in one breath
 

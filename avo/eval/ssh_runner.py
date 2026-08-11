@@ -37,6 +37,7 @@ class SSHRunner(Runner):
         self.host = cfg.host
         self.run_id = run_id
         self._home: str | None = None
+        self._sandbox_resolved: str | None = None
 
     # -- low-level helpers ---------------------------------------------------
 
@@ -137,9 +138,24 @@ class SSHRunner(Runner):
         finally:
             local_result.unlink(missing_ok=True)
 
+    def _sandbox_mode(self) -> str:
+        """Resolve 'auto' by probing the remote host for a working bwrap once."""
+        if self._sandbox_resolved is not None:
+            return self._sandbox_resolved
+        mode = self.cfg.sandbox
+        if mode == "auto":
+            probe = self._ssh(
+                "bwrap --ro-bind / / --tmpfs /tmp true >/dev/null 2>&1 "
+                "&& echo bwrap || echo none", 30)
+            mode = "bwrap" if probe.stdout.strip() == "bwrap" else "none"
+        self._sandbox_resolved = mode
+        return mode
+
     def run_shell(self, workspace: Path, command: str,
                   timeout_s: int | None = None) -> ShellResult:
-        """gpu_shell: sync the workspace to the remote work dir, run there."""
+        """gpu_shell: sync the workspace to the remote work dir, run there —
+        isolated from peer routes' remote scratch when bwrap is available."""
+        from avo.agent.sandbox import build_remote_shell_cmd
         t = timeout_s or self.cfg.shell_timeout_s
         remote_dir = self._remote("work/workspace")
         mk = self._ssh(f"mkdir -p {shlex.quote(remote_dir)}", 60)
@@ -148,9 +164,9 @@ class SSHRunner(Runner):
         up = self._rsync(workspace, remote_dir)
         if up.exit_code != 0:
             return up
-        return self._ssh(self._wrap_env(
-            f"cd {shlex.quote(remote_dir)} && timeout {t} bash -c {shlex.quote(command)}"),
-            t + 60)
+        inner = build_remote_shell_cmd(command, remote_dir,
+                                       self._sandbox_mode(), self._abs_scratch())
+        return self._ssh(self._wrap_env(f"timeout {t} {inner}"), t + 60)
 
 
 def make_runner(cfg: RunnerConfig, run_id: str) -> Runner:

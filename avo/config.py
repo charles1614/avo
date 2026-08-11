@@ -50,6 +50,11 @@ class RunnerConfig(BaseModel):
     # Same path on all runs sharing the GPU; "" disables. For ssh runners the
     # path is on the remote host (needs util-linux `flock`).
     gpu_lock: str = "/tmp/avo_gpu.lock"
+    # Filesystem isolation for agent shell/gpu_shell (bubblewrap). REQUIRED
+    # for multi-route integrity — without it agents can read/copy peer routes'
+    # workspaces and a shared /tmp. auto = bwrap if it works else none (with a
+    # loud warning); bwrap = require it; none = no isolation (single-route only).
+    sandbox: str = "auto"
 
     def identity(self) -> str:
         """Part of the eval-cache key: same code on a different target != same eval."""

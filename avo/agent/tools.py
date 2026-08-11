@@ -57,6 +57,8 @@ class ToolContext:
     runner: Runner | None = None  # SSH runner => gpu_shell available
     profile_fn: Callable[..., ScoreResult] | None = None  # task ships profile.py
     revert_fn: Callable[[], str] | None = None  # discard uncommitted work
+    sandbox: str = "auto"  # filesystem isolation mode for shell (see sandbox.py)
+    runs_dir: Path | None = None  # runs tree to hide from shell (peer routes)
     shell_timeout_s: int = 60
     gpu_shell_timeout_s: int = 120
     evals_used: int = 0
@@ -251,10 +253,14 @@ class ToolRegistry:
             return ToolOutcome(f"command denied by policy (matched {denied!r})",
                                is_error=True)
         t = min(timeout_s or self.ctx.shell_timeout_s, 600)
+        from avo.agent.sandbox import build_shell_argv
+        argv, _ = build_shell_argv(command, self.ctx.workspace,
+                                   mode=self.ctx.sandbox,
+                                   runs_dir=self.ctx.runs_dir)
         try:
-            proc = subprocess.run(["/bin/bash", "-c", command],
-                                  cwd=self.ctx.workspace, capture_output=True,
-                                  text=True, timeout=t)
+            # cwd handled by the wrapper (--chdir under bwrap); pass for none-mode
+            proc = subprocess.run(argv, cwd=self.ctx.workspace,
+                                  capture_output=True, text=True, timeout=t)
             res = ShellResult(proc.returncode, proc.stdout, proc.stderr)
         except subprocess.TimeoutExpired:
             res = ShellResult(-1, "", "", timed_out=True)

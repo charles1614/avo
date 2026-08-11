@@ -59,6 +59,18 @@ def main() -> None:
                  f"GPU busy ({busy}); refusing to produce noisy numbers")
             return
 
+    # -- forbid delegating to a pre-built fused attention op -------------------
+    # the task is to WRITE the kernel; calling cuDNN/SDPA/flash-attn measures
+    # the library, not the agent, and makes cross-model comparison meaningless
+    import checks
+    banned = checks.scan_banned_apis(Path(args.workspace))
+    if banned:
+        fail(args.out, "compile",
+             f"workspace calls a forbidden pre-built attention op ({banned}). "
+             "You must implement the attention kernel yourself; delegating to "
+             "a fused library API is not a valid solution.")
+        return
+
     # -- compile ---------------------------------------------------------------
     try:
         module = builder.build(Path(args.workspace),
