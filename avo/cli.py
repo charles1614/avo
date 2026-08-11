@@ -196,6 +196,16 @@ def cmd_export(args) -> int:
     return 0
 
 
+def cmd_audit(args) -> int:
+    """Contamination audit of a finished (or running) route — no LLM."""
+    from avo.evolution.integrity import audit_run, write_report
+    report = audit_run(Path(args.run), isolation=args.isolation)
+    out = write_report(Path(args.run), report)
+    print(json.dumps(report.summary(), indent=1))
+    print(f"[avo] full report: {out}")
+    return 2 if report.contaminated else 0
+
+
 def cmd_report(args) -> int:
     from avo.report.report import write_report
     path = write_report(Path(args.run),
@@ -264,6 +274,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--with-transcripts", action="store_true",
                    help="include full per-step agent transcripts (larger)")
     p.set_defaults(fn=cmd_export)
+
+    p = sub.add_parser("audit",
+                       help="detect cross-route / shared-tmp contamination (no LLM)")
+    p.add_argument("--run", required=True)
+    p.add_argument("--isolation", default="unknown",
+                   help="isolation mode in force during the run (for the record)")
+    p.set_defaults(fn=cmd_audit)
 
     p = sub.add_parser("report", help="render lineage table + plot (no LLM)")
     p.add_argument("--run", required=True)

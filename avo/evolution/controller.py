@@ -114,6 +114,7 @@ class Controller:
         self._route_uid = _route_uid(self.run_dir.name)
         self._private_tmp = self.run_dir / "tmp"
         self._private_tmp.mkdir(exist_ok=True)
+        self._isolation_mode = "unknown"  # set by _preflight
         self._harden_run_dir()
         self.state = self._load_state()
         self.budget = BudgetTracker(
@@ -218,6 +219,7 @@ class Controller:
         if self.config.runner.kind == "local":
             from avo.agent.sandbox import readable_residue, resolve_mode
             mode = resolve_mode(self.config.runner.sandbox)  # may raise
+            self._isolation_mode = mode
             log(f"[avo] shell isolation: {mode}"
                 + (f" (uid {self._route_uid})" if mode == "uid" else ""))
             if mode == "none":
@@ -450,6 +452,18 @@ class Controller:
             "usd": round(self.budget.usd, 4),
             "elapsed_s": round(self.budget.elapsed_s),
         }
+        # every run ends with a contamination verdict: when isolation cannot be
+        # enforced, results must at least be auditable rather than silently
+        # trusted (a route once bootstrapped from a peer's /tmp residue)
+        from avo.evolution.integrity import audit_run, write_report
+        report = audit_run(self.run_dir, isolation=self._isolation_mode)
+        write_report(self.run_dir, report)
+        summary["integrity"] = report.summary()
+        if report.contaminated:
+            log(f"[avo] INTEGRITY WARNING: {len(report.findings)} out-of-scope "
+                f"access(es) detected — see logs/integrity.json. This run's "
+                "score may reflect another route's work.")
+
         (self.run_dir / "summary.json").write_text(json.dumps(summary, indent=1))
         self._save_state()
         fcntl.flock(self._lock_file, fcntl.LOCK_UN)
