@@ -59,6 +59,8 @@ class ToolContext:
     revert_fn: Callable[[], str] | None = None  # discard uncommitted work
     sandbox: str = "auto"  # filesystem isolation mode for shell (see sandbox.py)
     runs_dir: Path | None = None  # runs tree to hide from shell (peer routes)
+    route_uid: int | None = None  # uid-isolation mode: this route's uid
+    private_tmp: Path | None = None  # per-route TMPDIR
     shell_timeout_s: int = 60
     gpu_shell_timeout_s: int = 120
     evals_used: int = 0
@@ -256,10 +258,17 @@ class ToolRegistry:
         from avo.agent.sandbox import build_shell_argv
         argv, _ = build_shell_argv(command, self.ctx.workspace,
                                    mode=self.ctx.sandbox,
-                                   runs_dir=self.ctx.runs_dir)
+                                   runs_dir=self.ctx.runs_dir,
+                                   uid=self.ctx.route_uid,
+                                   tmpdir=self.ctx.private_tmp)
+        env = None
+        if self.ctx.private_tmp:  # keep this route's temp files out of /tmp
+            import os as _os
+            env = {**_os.environ, "TMPDIR": str(self.ctx.private_tmp),
+                   "TMP": str(self.ctx.private_tmp)}
         try:
             # cwd handled by the wrapper (--chdir under bwrap); pass for none-mode
-            proc = subprocess.run(argv, cwd=self.ctx.workspace,
+            proc = subprocess.run(argv, cwd=self.ctx.workspace, env=env,
                                   capture_output=True, text=True, timeout=t)
             res = ShellResult(proc.returncode, proc.stdout, proc.stderr)
         except subprocess.TimeoutExpired:

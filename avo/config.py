@@ -58,10 +58,15 @@ class RunnerConfig(BaseModel):
     # several runs share a multi-GPU node/pod; exported as CUDA_VISIBLE_DEVICES
     # to the eval subprocess, so the harness always sees it as device 0.
     cuda_device: str = ""
-    # Filesystem isolation for agent shell/gpu_shell (bubblewrap). REQUIRED
-    # for multi-route integrity — without it agents can read/copy peer routes'
-    # workspaces and a shared /tmp. auto = bwrap if it works else none (with a
-    # loud warning); bwrap = require it; none = no isolation (single-route only).
+    # Filesystem isolation for agent shell/gpu_shell. REQUIRED for multi-route
+    # integrity — without it agents read peer workspaces and shared /tmp
+    # (observed twice in the field). Modes:
+    #   require - refuse to start unless isolation engages  [use for multi-route]
+    #   auto    - bwrap, else per-route uid, else none + loud warning
+    #   bwrap   - mount namespaces (needs userns/CAP_SYS_ADMIN)
+    #   uid     - per-route unprivileged uid + 0700 run dirs (needs root +
+    #             setpriv; NO capabilities — works in locked-down containers)
+    #   none    - no isolation; single-route experiments only
     sandbox: str = "auto"
 
     def identity(self) -> str:

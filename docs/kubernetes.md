@@ -58,6 +58,35 @@ being usable inside the container** (needs unprivileged user namespaces —
 typically blocked by the default seccomp/AppArmor profile). If bwrap does not
 work, prefer topology A for comparative experiments.
 
+## When bwrap cannot work (no CAP_SYS_ADMIN, no unprivileged userns)
+
+Most hardened containers block mount namespaces, so `bwrap` fails with
+`Failed to make / slave: Permission denied` and `proot`/`firejail` are equally
+unavailable. Pick in this order:
+
+1. **One route per container/pod** — the container *is* the sandbox, no
+   capabilities involved. This is the only option that isolates by
+   construction; use it for any comparative experiment.
+2. **`sandbox: uid`** (single container, several routes) — if the framework
+   runs as root *inside* the container, each route's shell is dropped to a
+   distinct unprivileged uid with `setpriv` and each run dir is `0700` owned
+   by that uid, so peers are unreadable. Needs **no capabilities and no user
+   namespaces** — only root inside the container, which locked-down setups
+   usually still allow. Also pins a private `TMPDIR` per route.
+3. **`sandbox: none`** — accept no isolation; valid for a *single* route only.
+
+Set **`sandbox: require`** for multi-route runs: the controller then refuses
+to start when neither mechanism engages, instead of degrading to a warning.
+That warning-and-continue behaviour is what let a route in one experiment
+bootstrap from a previous run's `/tmp` residue and produce an invalid result.
+
+Even with no isolation, the framework now keeps its own temp files in
+`runs/<id>/tmp` (0700) rather than a shared `/tmp`, and scans `/tmp` at
+startup for readable kernel/eval leftovers an agent could bootstrap from.
+`LD_PRELOAD` interception was considered and rejected: it only covers
+glibc-linked binaries (a static binary or a raw syscall walks straight past
+it), so it would provide the *appearance* of isolation without the guarantee.
+
 ## Cluster checklist
 
 1. **Persistent storage for `runs/`** — pods are ephemeral; without a PVC a

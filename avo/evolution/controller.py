@@ -108,6 +108,13 @@ class Controller:
                                      self.logs_dir / "supervisor.jsonl")
         self._has_profiler = (self.task_dir / self.task.harness_dir
                               / "profile.py").exists()
+        # per-route identity for uid isolation + a private TMPDIR so this
+        # route's temp files never land in a shared /tmp for peers to find
+        from avo.agent.sandbox import route_uid as _route_uid
+        self._route_uid = _route_uid(self.run_dir.name)
+        self._private_tmp = self.run_dir / "tmp"
+        self._private_tmp.mkdir(exist_ok=True)
+        self._harden_run_dir()
         self.state = self._load_state()
         self.budget = BudgetTracker(
             config, llm,
@@ -206,15 +213,25 @@ class Controller:
         unavailable shell isolation and a knowledge base that was promised
         but never fetched."""
         # 1. filesystem isolation for agent shell (local runner only; ssh
-        #    resolves lazily on first gpu_shell)
+        #    resolves lazily on first gpu_shell). `require` aborts here rather
+        #    than producing contaminated multi-route results.
         if self.config.runner.kind == "local":
-            from avo.agent.sandbox import bwrap_works
-            mode = self.config.runner.sandbox
-            if mode == "none" or (mode == "auto" and not bwrap_works()):
-                log("[avo] WARNING: shell filesystem isolation is OFF (bwrap "
-                    "unavailable or sandbox=none). Agents can read/copy peer "
-                    "routes' workspaces and a shared /tmp. Safe for a SINGLE "
-                    "route only; install bubblewrap for multi-route runs.")
+            from avo.agent.sandbox import readable_residue, resolve_mode
+            mode = resolve_mode(self.config.runner.sandbox)  # may raise
+            log(f"[avo] shell isolation: {mode}"
+                + (f" (uid {self._route_uid})" if mode == "uid" else ""))
+            if mode == "none":
+                log("[avo] WARNING: shell filesystem isolation is OFF. Agents "
+                    "can read peer routes' workspaces and shared /tmp. Safe "
+                    "for a SINGLE route only — use sandbox: require (and "
+                    "one container per route, or run as root for uid "
+                    "isolation) for comparative experiments.")
+                # the R4 contamination vector: readable leftovers in /tmp
+                residue = readable_residue()
+                if residue:
+                    log("[avo] WARNING: readable kernel/eval residue in /tmp — "
+                        f"an agent can bootstrap from it: {residue[:5]}. "
+                        "Clean it before a comparative run.")
         # 2. knowledge base: manifest entries actually present on disk?
         manifest = self.root / "knowledge_base" / "external" / "MANIFEST.json"
         if manifest.exists():
@@ -286,6 +303,20 @@ class Controller:
             self.state["failure_summaries"], self._source_snapshot(), reason)
         return guidance
 
+    def _harden_run_dir(self) -> None:
+        """0700 the run dir (and hand it to the route's uid when running as
+        root) so a peer route's shell cannot read this lineage/workspace even
+        without namespaces. Harmless when isolation is unavailable."""
+        import os
+        try:
+            os.chmod(self.run_dir, 0o700)
+            os.chmod(self._private_tmp, 0o700)
+            if os.geteuid() == 0:
+                for path in (self.run_dir, self._private_tmp):
+                    os.chown(path, self._route_uid, self._route_uid)
+        except OSError:
+            pass  # best effort: never block a run on permissions
+
     def _auto_profile_champion(self, log) -> None:
         """Profile each new champion once (GPU-only, cached); the summary is
         injected into subsequent step prompts so every attempt starts from a
@@ -316,6 +347,8 @@ class Controller:
             revert_fn=lambda: self._revert_workspace(log),
             sandbox=self.config.runner.sandbox,
             runs_dir=(self.root / self.config.runs_dir).resolve(),
+            route_uid=self._route_uid,
+            private_tmp=self._private_tmp,
             max_evals=self.config.budgets.max_evals_per_step,
         )
         registry = ToolRegistry(ctx)

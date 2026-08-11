@@ -22,12 +22,32 @@ documented as NOT providing cross-route integrity.
 from __future__ import annotations
 
 import functools
+import os
 import shlex
+import shutil
 import subprocess
 from pathlib import Path
 
 BWRAP_UNSHARE = ["--unshare-pid", "--unshare-ipc", "--unshare-uts",
                  "--die-with-parent"]
+
+
+def route_uid(run_name: str, base: int = 60_000, span: int = 4_000) -> int:
+    """Stable unprivileged uid for a route. No /etc/passwd entry is needed —
+    setpriv accepts a bare numeric uid — so this creates no users and touches
+    no container state."""
+    import hashlib
+    h = int(hashlib.sha256(run_name.encode()).hexdigest()[:8], 16)
+    return base + (h % span)
+
+
+@functools.lru_cache(maxsize=2)
+def uid_isolation_available() -> bool:
+    """POSIX-permission isolation: run agent shells as a per-route
+    unprivileged uid so peers' 0700 run dirs are unreadable. Needs root (to
+    drop privileges) but NO capabilities, NO user namespaces — it works in
+    locked-down containers where bwrap/proot cannot."""
+    return os.geteuid() == 0 and shutil.which("setpriv") is not None
 
 
 @functools.lru_cache(maxsize=8)
@@ -43,13 +63,50 @@ def bwrap_works(bwrap: str = "bwrap") -> bool:
         return False
 
 
+class SandboxUnavailable(RuntimeError):
+    """Raised when isolation was REQUIRED but no mechanism works here."""
+
+
+def resolve_mode(mode: str) -> str:
+    """auto/require -> the mechanism actually usable on this host.
+    Order: bwrap (namespaces) > uid (POSIX permissions) > none.
+    'require' raises instead of degrading — a multi-route experiment that
+    silently loses isolation produces contaminated results (observed: a route
+    bootstrapped from another run's /tmp residue)."""
+    if mode in ("bwrap", "uid", "none"):
+        return mode
+    if bwrap_works():
+        return "bwrap"
+    if uid_isolation_available():
+        return "uid"
+    if mode == "require":
+        raise SandboxUnavailable(
+            "filesystem isolation REQUIRED but unavailable: bwrap cannot "
+            "create a namespace (no CAP_SYS_ADMIN / unprivileged userns) and "
+            "uid isolation needs root + setpriv. Options: (a) run one route "
+            "per container/pod — the container is then the sandbox — "
+            "(b) run the framework as root inside the container so per-route "
+            "uid isolation can engage, or (c) set sandbox: none to accept "
+            "NO isolation (single-route experiments only).")
+    return "none"
+
+
 def build_shell_argv(command: str, workspace: Path, mode: str = "auto",
-                     runs_dir: Path | None = None) -> tuple[list[str], str]:
-    """Return (argv, effective_mode). mode: auto|bwrap|none.
-    'auto' uses bwrap when it works, else falls back to none."""
+                     runs_dir: Path | None = None,
+                     uid: int | None = None,
+                     tmpdir: Path | None = None) -> tuple[list[str], str]:
+    """Return (argv, effective_mode). mode: auto|require|bwrap|uid|none."""
     ws = Path(workspace).resolve()
-    if mode == "auto":
-        mode = "bwrap" if bwrap_works() else "none"
+    mode = resolve_mode(mode)
+    if mode == "uid":
+        # drop to the route's uid: peers' run dirs are 0700 and owned by
+        # different uids, so they are unreadable; TMPDIR is private
+        env = ["env", f"TMPDIR={tmpdir or ws / '.tmp'}",
+               f"TMP={tmpdir or ws / '.tmp'}", f"HOME={ws}"]
+        argv = ["setpriv", f"--reuid={uid}", f"--regid={uid}",
+                "--clear-groups", "--inh-caps=-all", *env,
+                "/bin/bash", "-c", f"cd {shlex.quote(str(ws))} && {command}"]
+        return argv, "uid"
     if mode == "bwrap":
         # blank the runs tree (hide peers) then re-expose only this workspace
         runs = Path(runs_dir).resolve() if runs_dir else ws.parent.parent
@@ -59,6 +116,34 @@ def build_shell_argv(command: str, workspace: Path, mode: str = "auto",
                 "--chdir", str(ws), "/bin/bash", "-c", command]
         return argv, "bwrap"
     return ["/bin/bash", "-c", command], "none"
+
+
+AVO_RESIDUE_GLOBS = ("avo_eval_*", "avo_stage_*", "avo_*", "*attention*.cu",
+                     "*.ptx", "*kernel*.cu")
+
+
+def readable_residue(tmp_dir: str = "/tmp", limit: int = 12) -> list[str]:
+    """Readable leftovers in a shared /tmp that an agent could bootstrap from.
+
+    This is exactly how R4 was contaminated: a route ran `ls /tmp`, found a
+    previous run's kernel sources, and reached 181 TFLOPS in 3 steps instead
+    of deriving anything. Without isolation the framework must at least refuse
+    to start on a dirty /tmp.
+    """
+    hits: list[str] = []
+    root = Path(tmp_dir)
+    if not root.is_dir():
+        return hits
+    for pattern in AVO_RESIDUE_GLOBS:
+        for p in root.glob(pattern):
+            try:
+                if os.access(p, os.R_OK):
+                    hits.append(str(p))
+            except OSError:
+                continue
+            if len(hits) >= limit:
+                return sorted(set(hits))
+    return sorted(set(hits))
 
 
 def build_remote_shell_cmd(command: str, workspace_abs: str, mode: str,

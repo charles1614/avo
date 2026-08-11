@@ -44,11 +44,18 @@ python scripts/run_kernelbench.py --config configs/kernelbench_h100.yaml \
    instances (timing accuracy + memory), LLM turns overlap. The lock is
    acquired before the eval's timeout clock starts. Don't remove it, and
    keep one shared path per GPU.
-8. **Multi-route filesystem integrity depends on `runner.sandbox`** (bwrap):
-   shell/gpu_shell run in a namespace that blanks `runs/` and re-exposes only
-   the calling workspace + a private /tmp. A deny-list alone CANNOT isolate
-   routes (shell is a full language) — observed: agents copying peers'
-   solutions. Needs bubblewrap on the host; `auto` warns and degrades if absent.
+8. **Multi-route filesystem integrity depends on `runner.sandbox`.** A
+   deny-list CANNOT isolate routes (shell is a full language) — observed
+   twice: agents copying a peer's solution, and a route bootstrapping from a
+   previous run's `/tmp` residue. Mechanisms, in preference order: `bwrap`
+   (mount namespaces) → `uid` (per-route unprivileged uid via setpriv + 0700
+   run dirs; needs root but NO capabilities, so it works in containers where
+   bwrap can't) → `none`. **Use `sandbox: require` for comparative runs**: it
+   aborts rather than degrading, because a silent degrade produces
+   contaminated results that look valid. Run dirs are chmod 0700 and each run
+   gets a private `runs/<id>/tmp` TMPDIR; the preflight scans `/tmp` for
+   readable residue. Rejected: LD_PRELOAD interception (glibc-only, bypassable
+   — the appearance of isolation without the guarantee).
 9. **Integrity lives in `harness_lib/avo_harness`, never in task code.** The
    runners stage it into every eval's `harness/` dir, so `import avo_harness`
    works locally and on remote hosts. It owns result tokens, structured
