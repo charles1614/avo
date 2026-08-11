@@ -31,6 +31,18 @@ def test_banned_attention_apis_detected(tmp_path):
     assert common.scan_banned_apis(ws)
 
 
+def test_banned_patterns_are_task_configurable(tmp_path):
+    """Any hand-written-kernel task can declare its own bans (a GEMM task
+    bans cuBLAS; attention's defaults would not catch that)."""
+    common = load("tasks/attention_cuda/harness/checks.py", "attn_checks_cfg")
+    ws = tmp_path / "gemm"
+    ws.mkdir()
+    (ws / "gemm.cu").write_text("cublasLtMatmul(handle, ...);")
+    assert common.scan_banned_apis(ws) is None          # attention defaults
+    hit = common.scan_banned_apis(ws, [r"cublas\w*Matmul", r"at::matmul"])
+    assert hit and "cublasLtMatmul" in hit               # task-declared ban
+
+
 def test_banned_scan_ignores_comments_and_allows_gemm(tmp_path):
     common = load("tasks/attention_cuda/harness/checks.py", "attn_checks_scan2")
     ws = tmp_path / "ok"

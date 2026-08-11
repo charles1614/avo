@@ -1,4 +1,12 @@
-"""Torch-free source checks for the attention harness (importable offline)."""
+"""Torch-free source checks (importable offline).
+
+Reusable by ANY hand-written-kernel task: the default pattern list bans fused
+attention entry points, and a task can override or extend it via
+`task_params.banned_apis` (a list of regexes) — e.g. a GEMM task would ban
+`cublas.*Gemm|at::matmul`, a conv task `cudnnConvolutionForward`. Without such
+a ban, an agent can delegate to a vendor library and the score measures the
+library rather than the agent (observed: 608 TFLOPS via SDPA).
+"""
 from __future__ import annotations
 
 import re
@@ -17,10 +25,11 @@ BANNED_API_PATTERNS = [
 _SRC_EXT = (".cu", ".cuh", ".cpp", ".cc", ".h", ".hpp", ".py")
 
 
-def scan_banned_apis(workspace) -> str | None:
-    """First banned attention-API symbol in workspace source, or None.
-    Comments are stripped so a mention in a comment doesn't false-trip."""
-    pat = re.compile("|".join(BANNED_API_PATTERNS))
+def scan_banned_apis(workspace, patterns: list[str] | None = None) -> str | None:
+    """First banned-API symbol in workspace source, or None. Comments are
+    stripped so a mention in a comment doesn't false-trip. `patterns`
+    overrides the attention defaults (see task_params.banned_apis)."""
+    pat = re.compile("|".join(patterns or BANNED_API_PATTERNS))
     for p in sorted(Path(workspace).rglob("*")):
         if p.suffix.lower() not in _SRC_EXT or not p.is_file():
             continue

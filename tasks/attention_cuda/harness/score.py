@@ -1,160 +1,80 @@
-"""Scoring harness for the attention_cuda task.
+"""Scoring for the attention_cuda task.
+
+Everything that protects the experiment — GPU busy guard, banned-API scan,
+correctness-before-timing, the post-benchmark anti-memoization recheck, result
+tokens, structured failures, CUDA-event timing — lives in the shared
+`avo_harness` library and is applied by `run_scoring`. This file supplies only
+what is specific to attention: how to build the kernel, the benchmark grid,
+the correctness reference, and the TFLOPS metric.
 
 Protocol: python harness/score.py --workspace <dir> --params-b64 <b64> --out result.json
-Stages: compile -> correctness on every grid config (3 randomized trials each,
-zero score on any failure) -> CUDA-event benchmark -> geomean TFLOPS.
 """
 from __future__ import annotations
 
-import argparse
-import base64
-import json
 import sys
-import traceback
 from pathlib import Path
 
 HARNESS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(HARNESS_DIR))
 
-CORRECTNESS_TRIALS = 3
+import avo_harness as ah  # noqa: E402  (staged beside this file)
+import build as builder  # noqa: E402
+import common  # noqa: E402
+
+# attention-specific default bans: hand-write the kernel, don't call a fused
+# vendor implementation. GEMM primitives (cuBLAS/CUTLASS) remain allowed.
+DEFAULT_BANNED_APIS = [
+    r"scaled_dot_product_attention",
+    r"cudnnMultiHeadAttn", r"cudnn_attention", r"cudnnAttn", r"cudnnFusedAttn",
+    r"_flash_attention", r"flash_attn_", r"mem_efficient_attention",
+    r"at::native::[A-Za-z_]*attention", r"_scaled_dot_product", r"xformers",
+]
 
 
-RESULT_TOKEN = ""
+def load(args: ah.HarnessArgs):
+    module = builder.build(args.workspace, args.params.get("arch_flags", []))
+    return module.attention_forward
 
 
-def write(out_path: str, payload: dict) -> None:
-    payload.setdefault("meta", {})["result_token"] = RESULT_TOKEN
-    Path(out_path).write_text(json.dumps(payload, indent=1))
+def configs(kernel_fn, args: ah.HarnessArgs) -> list:
+    return common.config_grid(args.params)
 
 
-def fail(out_path: str, stage: str, detail: str, log_tail: str = "") -> None:
-    write(out_path, {"correct": False, "score": 0.0,
-                     "error": {"stage": stage, "detail": detail[:2000],
-                               "log_tail": log_tail[-20_000:]},
-                     "configs": [], "meta": {}})
-    sys.exit(0)
+def check(kernel_fn, cfg: dict, seed: int, args: ah.HarnessArgs) -> dict:
+    res = common.check_config(kernel_fn, cfg, seed)
+    return {"ok": res["ok"],
+            "detail": (f"max_abs_err={res['max_abs_err']:.5f} > "
+                       f"threshold={res['err_threshold']:.5f}"),
+            "max_abs_err": res["max_abs_err"],
+            "err_threshold": res["err_threshold"]}
+
+
+def measure(kernel_fn, cfg: dict, args: ah.HarnessArgs) -> dict:
+    import torch
+    p = args.params
+    warmup = int(p.get("warmup", common.DEFAULT_GRID["warmup"]))
+    repeats = int(p.get("repeats", common.DEFAULT_GRID["repeats"]))
+    q, k, v = common.make_qkv(cfg, seed=int(p.get("rng_seed", 0)) % (2**31))
+    causal = cfg["causal"]
+    try:
+        ms = ah.bench_ms(lambda: kernel_fn(q, k, v, causal), warmup, repeats)
+        tflops = common.attention_tflops(cfg, ms)
+    finally:
+        del q, k, v
+        torch.cuda.empty_cache()
+    return {"median_ms": ms, "tflops": tflops, "metric_value": tflops}
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--workspace", required=True)
-    ap.add_argument("--params-b64", required=True)
-    ap.add_argument("--out", required=True)
-    ap.add_argument("--result-token", default="")
-    args = ap.parse_args()
-    global RESULT_TOKEN
-    RESULT_TOKEN = args.result_token
-    params = json.loads(base64.b64decode(args.params_b64))
-
-    try:
-        import torch
-    except ImportError as e:
-        fail(args.out, "harness", f"torch not importable: {e}")
-        return
-    if not torch.cuda.is_available():
-        fail(args.out, "harness", "CUDA not available on this host")
-        return
-
-    import common
-    import build as builder
-
-    if not params.get("allow_busy", False):
-        busy = common.gpu_busy_reason()
-        if busy:
-            # stage "harness": a transient machine condition, never cached
-            fail(args.out, "harness",
-                 f"GPU busy ({busy}); refusing to produce noisy numbers")
-            return
-
-    # -- forbid delegating to a pre-built fused attention op -------------------
-    # the task is to WRITE the kernel; calling cuDNN/SDPA/flash-attn measures
-    # the library, not the agent, and makes cross-model comparison meaningless
-    import checks
-    banned = checks.scan_banned_apis(Path(args.workspace))
-    if banned:
-        fail(args.out, "compile",
-             f"workspace calls a forbidden pre-built attention op ({banned}). "
-             "You must implement the attention kernel yourself; delegating to "
-             "a fused library API is not a valid solution.")
-        return
-
-    # -- compile ---------------------------------------------------------------
-    try:
-        module = builder.build(Path(args.workspace),
-                               params.get("arch_flags", []))
-    except Exception as e:
-        fail(args.out, "compile", f"{type(e).__name__}: {e}",
-             traceback.format_exc())
-        return
-    kernel_fn = module.attention_forward
-
-    configs = common.config_grid(params)
-    rng_seed = int(params.get("rng_seed", 0))
-
-    # -- correctness (all configs before any benching) ---------------------------
-    checked = []
-    for i, cfg in enumerate(configs):
-        for trial in range(CORRECTNESS_TRIALS):
-            seed = (rng_seed * 1_000_003 + i * 101 + trial) % (2**31)
-            try:
-                res = common.check_config(kernel_fn, cfg, seed)
-            except Exception as e:
-                fail(args.out, "correctness",
-                     f"kernel raised on config {cfg}: {type(e).__name__}: {e}",
-                     traceback.format_exc())
-                return
-            if not res["ok"]:
-                fail(args.out, "correctness",
-                     f"config {cfg} trial {trial}: max_abs_err={res['max_abs_err']:.5f} "
-                     f"> threshold={res['err_threshold']:.5f}")
-                return
-        checked.append(res)
-
-    # -- benchmark ----------------------------------------------------------------
-    warmup = int(params.get("warmup", common.DEFAULT_GRID["warmup"]))
-    repeats = int(params.get("repeats", common.DEFAULT_GRID["repeats"]))
-    results = []
-    try:
-        for cfg, chk in zip(configs, checked):
-            q, k, v = common.make_qkv(cfg, seed=rng_seed % (2**31))
-            causal = cfg["causal"]
-            ms = common.bench_ms(lambda: kernel_fn(q, k, v, causal),
-                                 warmup, repeats)
-            results.append({**cfg, "max_abs_err": chk["max_abs_err"],
-                            "err_threshold": chk["err_threshold"],
-                            "median_ms": ms,
-                            "tflops": common.attention_tflops(cfg, ms)})
-            del q, k, v
-            torch.cuda.empty_cache()
-    except Exception as e:
-        fail(args.out, "bench", f"{type(e).__name__}: {e}", traceback.format_exc())
-        return
-
-    # -- post-benchmark re-verification (anti-memoization) ---------------------
-    # a kernel that caches its output would pass the pre-bench checks and then
-    # time near-zero on the repeated identical bench calls; re-check with a
-    # FRESH seed after timing to catch stale/cached results
-    for i, cfg in enumerate(configs):
-        seed = (rng_seed * 7_919 + i * 104_729 + 31) % (2**31)
-        try:
-            res = common.check_config(kernel_fn, cfg, seed)
-        except Exception as e:
-            fail(args.out, "correctness",
-                 f"post-bench recheck raised on {cfg}: {type(e).__name__}: {e}",
-                 traceback.format_exc())
-            return
-        if not res["ok"]:
-            fail(args.out, "correctness",
-                 f"post-benchmark recheck FAILED on {cfg} "
-                 f"(max_abs_err={res['max_abs_err']:.5f}) — the kernel returns "
-                 "stale/cached output for new inputs")
-            return
-
-    score = common.geomean([r["tflops"] for r in results])
-    write(args.out, {"correct": True, "score": score, "error": None,
-                     "configs": results,
-                     "meta": {**common.gpu_meta(),
-                              "warmup": warmup, "repeats": repeats}})
+    args = ah.parse_args()
+    args.params.setdefault("banned_apis", DEFAULT_BANNED_APIS)
+    ah.run_scoring(args, ah.ScoringHooks(
+        load=load, configs=configs, check=check, measure=measure,
+        meta=lambda: {"warmup": args.params.get("warmup",
+                                                common.DEFAULT_GRID["warmup"]),
+                      "repeats": args.params.get("repeats",
+                                                 common.DEFAULT_GRID["repeats"])},
+        correctness_trials=3))
 
 
 if __name__ == "__main__":

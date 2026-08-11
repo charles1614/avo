@@ -20,6 +20,20 @@ from avo.eval.scoring import encode_params
 from avo.types import ScoreResult, ShellResult, truncate_middle
 
 COPY_IGNORE = shutil.ignore_patterns(".git", "__pycache__", ".pytest_cache")
+# shared integrity library, staged INSIDE harness/ so `import avo_harness`
+# resolves from sys.path[0] (the harness dir) with no env plumbing
+HARNESS_LIB = Path(__file__).resolve().parents[2] / "harness_lib" / "avo_harness"
+
+
+def stage_eval_tree(staged: Path, workspace: Path, harness: Path) -> None:
+    """Lay out {workspace, harness + avo_harness} for one evaluation. The
+    harness is always copied fresh from the pristine task dir, and every task
+    gets the shared integrity library whether or not it asked for it."""
+    shutil.copytree(workspace, staged / "workspace", ignore=COPY_IGNORE)
+    shutil.copytree(harness, staged / "harness", ignore=COPY_IGNORE)
+    if HARNESS_LIB.is_dir():
+        shutil.copytree(HARNESS_LIB, staged / "harness" / "avo_harness",
+                        ignore=COPY_IGNORE, dirs_exist_ok=True)
 
 
 class Runner(ABC):
@@ -153,8 +167,7 @@ class LocalRunner(Runner):
               params: dict) -> ScoreResult:
         with tempfile.TemporaryDirectory(prefix="avo_eval_") as td:
             staged = Path(td)
-            shutil.copytree(workspace, staged / "workspace", ignore=COPY_IGNORE)
-            shutil.copytree(harness, staged / "harness", ignore=COPY_IGNORE)
+            stage_eval_tree(staged, workspace, harness)
             token = new_result_token()
             try:
                 with gpu_lock(self.cfg.lock_path(),

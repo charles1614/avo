@@ -187,6 +187,23 @@ def main() -> None:
         ref_model = ref_mod.Model(*init_inputs).cuda()
         torch.manual_seed(rng_seed)  # identical init for stateful models
         new_model = ModelNew(*init_inputs).cuda()
+        # eval mode: 18 KernelBench problems use Dropout (random per call =>
+        # false correctness failures) and 30 use BatchNorm (train mode uses
+        # batch stats and mutates running stats). Inference is what we score.
+        ref_model.eval()
+        new_model.eval()
+        # seeded construction only matches while the candidate creates
+        # parameters in the reference's order; a restructured/fused model
+        # would otherwise be judged against different weights. Transfer the
+        # reference's weights whenever the parameter set is identical.
+        weights_transferred = False
+        ref_sd = ref_model.state_dict()
+        if set(new_model.state_dict()) == set(ref_sd):
+            try:
+                new_model.load_state_dict(ref_sd)
+                weights_transferred = True
+            except RuntimeError:
+                pass  # shape mismatch: fall back to seeded init
     except Exception as e:
         fail(args.out, "compile", f"model construction failed: {type(e).__name__}: {e}",
              traceback.format_exc())
@@ -271,7 +288,8 @@ def main() -> None:
                      "ref_ms": ref_ms, "new_ms": new_ms,
                      "speedup": speedup, "max_abs_err": max_err,
                      "throughput": speedup}],
-        "meta": {"gpu": torch.cuda.get_device_name(0),
+        "meta": {"weights_transferred": weights_transferred,
+                 "gpu": torch.cuda.get_device_name(0),
                  "torch": torch.__version__, "cuda": torch.version.cuda,
                  "warmup": params["warmup"], "repeats": params["repeats"],
                  "tolerance": tol}})

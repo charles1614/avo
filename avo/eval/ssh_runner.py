@@ -19,7 +19,7 @@ from pathlib import Path
 
 from avo.config import RunnerConfig
 from avo.eval.runner import (COPY_IGNORE, Runner, _dec, _score_cmd,
-                             parse_result_file)
+                             parse_result_file, stage_eval_tree)
 from avo.types import ScoreResult, ShellResult
 
 SSH_OPTS = ["-o", "ControlMaster=auto", "-o", "ControlPath=~/.ssh/avo-%r@%h-%p",
@@ -96,8 +96,7 @@ class SSHRunner(Runner):
               params: dict) -> ScoreResult:
         with tempfile.TemporaryDirectory(prefix="avo_stage_") as td:
             staged = Path(td)
-            shutil.copytree(workspace, staged / "workspace", ignore=COPY_IGNORE)
-            shutil.copytree(harness, staged / "harness", ignore=COPY_IGNORE)
+            stage_eval_tree(staged, workspace, harness)
             (staged / "result.json").unlink(missing_ok=True)
 
             remote_dir = self._remote("eval")

@@ -49,20 +49,24 @@ python scripts/run_kernelbench.py --config configs/kernelbench_h100.yaml \
    the calling workspace + a private /tmp. A deny-list alone CANNOT isolate
    routes (shell is a full language) — observed: agents copying peers'
    solutions. Needs bubblewrap on the host; `auto` warns and degrades if absent.
-9. **Scoring results carry a per-eval nonce** (`--result-token`, echoed in
-   `meta`). Candidate code is loaded IN-PROCESS by scoring harnesses (a .so,
-   or `model_new.py`) and can write `result.json` then `os._exit(0)`; a
-   correct+positive result without the matching token is rejected as forged.
-   Any new scoring harness MUST echo it.
-10. **Harnesses re-verify correctness AFTER benchmarking** with a fresh seed —
-   a memoizing candidate passes pre-bench checks then "runs" in ~0 ms on the
-   repeated identical timing calls. Don't drop this recheck.
-11. **Task scoring must forbid delegating to the thing being optimized.** The
-   attention harness scans source for fused-attention APIs
-   (`tasks/attention_cuda/harness/checks.py`) and scores 0 — else an agent
-   calls SDPA/cuDNN and measures the library, not itself. New kernel tasks
-   need the analogous ban. (KernelBench is exempt: better library calls are a
-   legitimate optimization there.)
+9. **Integrity lives in `harness_lib/avo_harness`, never in task code.** The
+   runners stage it into every eval's `harness/` dir, so `import avo_harness`
+   works locally and on remote hosts. It owns result tokens, structured
+   `fail()`/`write_result()`, the container-safe GPU busy guard, the
+   banned-API scan, CUDA-event timing, and `run_scoring()`, which fixes the
+   sequence *ban scan → load → correctness → benchmark → post-bench recheck →
+   tokened write*. New tasks call `run_scoring` with hooks and supply task
+   logic only. **Never re-implement a guard inside a task harness** — that is
+   how a task silently ships without one (it happened: the busy guard was
+   duplicated and drifted).
+   - token: candidate code loads IN-PROCESS (a .so, `model_new.py`) and could
+     write `result.json` + `os._exit(0)`; positive scores without it are forged.
+   - post-bench recheck: catches candidates that memoize and time ~0 ms.
+   - banned APIs: per task via `task_params.banned_apis`. KernelBench is
+     deliberately exempt — better library calls are legitimate there.
+10. **KernelBench models run in `.eval()` with reference weights transferred**
+   — 18 problems use Dropout (random per call) and 30 use BatchNorm; train
+   mode makes legitimate implementations fail correctness at random.
 
 ## Architecture in one breath
 

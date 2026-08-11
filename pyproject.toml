@@ -25,5 +25,8 @@ avo = "avo.cli:main"
 [tool.setuptools.packages.find]
 include = ["avo*"]
 
+# harness_lib/ is NOT installed as a package: it is staged into each eval's
+# harness dir by the runners so it travels to remote hosts with the eval.
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

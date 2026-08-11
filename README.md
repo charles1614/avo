@@ -218,7 +218,21 @@ results/              exported, committable run artifacts (lineage, history
                       bundle, final source, transcripts, dashboards)
 ```
 
-**Adding a new kernel task** requires zero framework changes: a task is a directory with `task.yaml`, a `seed/`, and a `harness/score.py` following the result-JSON contract (`{"correct": bool, "score": float, "configs": [...]}`). The CUDA build/timing utilities in `tasks/attention_cuda/harness/` are kernel-agnostic and copy-pastable.
+**Adding a new kernel task** requires zero framework changes, and the task *inherits* the experiment-integrity guarantees instead of re-implementing them. A task is a directory with `task.yaml`, a `seed/`, and a `harness/score.py` that calls `avo_harness.run_scoring()` with four task-specific hooks:
+
+```python
+import avo_harness as ah            # staged into every eval automatically
+
+args = ah.parse_args()
+args.params.setdefault("banned_apis", [r"cublas\w*Gemm"])   # ban the library your task is about
+ah.run_scoring(args, ah.ScoringHooks(
+    load=lambda a: build_my_kernel(a.workspace),
+    configs=lambda cand, a: my_benchmark_grid(a.params),
+    check=lambda cand, cfg, seed, a: {"ok": ..., "detail": ...},
+    measure=lambda cand, cfg, a: {"metric_value": tflops, "median_ms": ms}))
+```
+
+`run_scoring` then enforces, identically for every task: GPU busy guard → banned-API scan → correctness before any timing → benchmark → **post-benchmark recheck with fresh seeds** (catches candidates that memoize their output and then "run" in ~0 ms) → result written with the per-eval token the runner verifies (a positive score without it is rejected as forged, since candidate code is loaded in-process). See [`harness_lib/avo_harness`](harness_lib/avo_harness/__init__.py), with `tasks/attention_cuda/harness/score.py` as the reference implementation.
 
 ## Reproducibility
 

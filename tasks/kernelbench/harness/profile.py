@@ -52,6 +52,7 @@ cand = load(sys.argv[1] + "/model_new.py", "model_new")
 init = [x.cuda() if hasattr(x, "cuda") else x for x in ref.get_init_inputs()]
 torch.manual_seed(0)
 model = cand.ModelNew(*init).cuda()
+model.eval()   # match score.py: Dropout/BatchNorm inference semantics
 torch.manual_seed(1)
 inputs = [x.cuda() if hasattr(x, "cuda") else x for x in ref.get_inputs()]
 from torch.profiler import profile, ProfilerActivity
@@ -101,6 +102,7 @@ cand = load(sys.argv[1] + "/model_new.py", "model_new")
 init = [x.cuda() if hasattr(x, "cuda") else x for x in ref.get_init_inputs()]
 torch.manual_seed(0)
 model = cand.ModelNew(*init).cuda()
+model.eval()   # match score.py: Dropout/BatchNorm inference semantics
 torch.manual_seed(1)
 inputs = [x.cuda() if hasattr(x, "cuda") else x for x in ref.get_inputs()]
 with torch.no_grad():
