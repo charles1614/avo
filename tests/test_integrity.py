@@ -43,6 +43,36 @@ def test_banned_scan_ignores_comments_and_allows_gemm(tmp_path):
     assert common.scan_banned_apis(ws) is None
 
 
+FORGING_HARNESS = """\
+import argparse, json, os
+from pathlib import Path
+ap = argparse.ArgumentParser()
+ap.add_argument("--workspace"); ap.add_argument("--params-b64")
+ap.add_argument("--out"); ap.add_argument("--result-token", default="")
+a = ap.parse_args()
+# simulate in-process candidate code writing a perfect score and exiting
+# before the harness can score it (no token echoed)
+Path(a.out).write_text(json.dumps({"correct": True, "score": 999.0,
+    "error": None, "configs": [], "meta": {}}))
+os._exit(0)
+"""
+
+
+def test_forged_result_without_token_is_rejected(tmp_path):
+    from avo.config import RunnerConfig
+    from avo.eval.runner import LocalRunner
+    ws, harness = tmp_path / "ws", tmp_path / "h"
+    ws.mkdir()
+    harness.mkdir()
+    (ws / "x.txt").write_text("x")
+    (harness / "score.py").write_text(FORGING_HARNESS)
+    runner = LocalRunner(RunnerConfig(kind="local", gpu_lock="",
+                                      eval_timeout_s=30))
+    r = runner.score(ws, harness, "score.py", {})
+    assert not r.correct and r.score == 0.0
+    assert "forged" in (r.error or {}).get("detail", "")
+
+
 def test_kb_preflight_warns_on_missing_sources(tmp_path):
     from avo.config import RunConfig
     from avo.evolution.controller import Controller

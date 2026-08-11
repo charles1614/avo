@@ -24,10 +24,13 @@ TIMING_REPEATS = 5
 SLOW_SINGLE_RUN_S = 5.0  # if one run is slower than this, skip repeats
 
 
+RESULT_TOKEN = ""
+
+
 def fail(stage: str, detail: str, out_path: str) -> None:
     result = {"correct": False, "score": 0.0,
               "error": {"stage": stage, "detail": detail, "log_tail": ""},
-              "configs": [], "meta": {}}
+              "configs": [], "meta": {"result_token": RESULT_TOKEN}}
     Path(out_path).write_text(json.dumps(result, indent=1))
     sys.exit(0)
 
@@ -109,7 +112,10 @@ def main() -> None:
     ap.add_argument("--workspace", required=True)
     ap.add_argument("--params-b64", required=True)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--result-token", default="")
     args = ap.parse_args()
+    global RESULT_TOKEN
+    RESULT_TOKEN = args.result_token
 
     params = json.loads(base64.b64decode(args.params_b64))
     sizes = params.get("sizes", DEFAULT_SIZES)
@@ -136,7 +142,8 @@ def main() -> None:
         return
 
     result = {"correct": True, "score": score, "error": None, "configs": configs,
-              "meta": {"python": sys.version.split()[0], "sizes": sizes}}
+              "meta": {"python": sys.version.split()[0], "sizes": sizes,
+                       "result_token": RESULT_TOKEN}}
     Path(args.out).write_text(json.dumps(result, indent=1))
 
 

@@ -19,7 +19,11 @@ sys.path.insert(0, str(HARNESS_DIR))
 CORRECTNESS_TRIALS = 3
 
 
+RESULT_TOKEN = ""
+
+
 def write(out_path: str, payload: dict) -> None:
+    payload.setdefault("meta", {})["result_token"] = RESULT_TOKEN
     Path(out_path).write_text(json.dumps(payload, indent=1))
 
 
@@ -36,7 +40,10 @@ def main() -> None:
     ap.add_argument("--workspace", required=True)
     ap.add_argument("--params-b64", required=True)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--result-token", default="")
     args = ap.parse_args()
+    global RESULT_TOKEN
+    RESULT_TOKEN = args.result_token
     params = json.loads(base64.b64decode(args.params_b64))
 
     try:
@@ -122,6 +129,26 @@ def main() -> None:
     except Exception as e:
         fail(args.out, "bench", f"{type(e).__name__}: {e}", traceback.format_exc())
         return
+
+    # -- post-benchmark re-verification (anti-memoization) ---------------------
+    # a kernel that caches its output would pass the pre-bench checks and then
+    # time near-zero on the repeated identical bench calls; re-check with a
+    # FRESH seed after timing to catch stale/cached results
+    for i, cfg in enumerate(configs):
+        seed = (rng_seed * 7_919 + i * 104_729 + 31) % (2**31)
+        try:
+            res = common.check_config(kernel_fn, cfg, seed)
+        except Exception as e:
+            fail(args.out, "correctness",
+                 f"post-bench recheck raised on {cfg}: {type(e).__name__}: {e}",
+                 traceback.format_exc())
+            return
+        if not res["ok"]:
+            fail(args.out, "correctness",
+                 f"post-benchmark recheck FAILED on {cfg} "
+                 f"(max_abs_err={res['max_abs_err']:.5f}) — the kernel returns "
+                 "stale/cached output for new inputs")
+            return
 
     score = common.geomean([r["tflops"] for r in results])
     write(args.out, {"correct": True, "score": score, "error": None,

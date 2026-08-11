@@ -59,6 +59,7 @@ def main() -> None:
     ap.add_argument("--workspace", required=True)  # unused; protocol compat
     ap.add_argument("--params-b64", required=True)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--result-token", default="")
     args = ap.parse_args()
     params = json.loads(base64.b64decode(args.params_b64))
 

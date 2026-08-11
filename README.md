@@ -141,6 +141,18 @@ absent, `auto` falls back to no isolation and the run prints a loud warning —
 safe for a single route only. `sandbox: bwrap` hard-requires it. (Ubuntu 24.04
 also needs `sysctl kernel.apparmor_restrict_unprivileged_userns=0`.)
 
+**Serial and parallel are both supported, per config**, by choosing what the
+lock is keyed on:
+
+| goal | setting | effect |
+|---|---|---|
+| parallel across cards | `gpu_lock: "/tmp/avo_gpu{device}.lock"` (default) | one eval per GPU at a time; N cards ⇒ N evals in flight |
+| strictly serial node-wide | `gpu_lock: "/tmp/avo_node.lock"` (no `{device}`) | exactly one eval on the whole node — maximum timing fidelity (no PCIe/power/thermal cross-talk) |
+| serial on a shared card | same path, same `cuda_device` | routes sharing a GPU queue automatically |
+| no locking | `gpu_lock: ""` | for pod-per-GPU setups where nothing is shared |
+
+LLM turns always overlap regardless — only GPU execution is gated.
+
 On a **multi-GPU node**, give each route its own card with
 `runner.cuda_device: "0".."7"` — it is exported as `CUDA_VISIBLE_DEVICES` to
 the eval subprocess, and `gpu_lock` defaults to a per-device path

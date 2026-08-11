@@ -108,8 +108,11 @@ class SSHRunner(Runner):
             if up.exit_code != 0:
                 return ScoreResult.failure("harness", "rsync to remote failed", up.render())
 
+        from avo.eval.runner import new_result_token, verify_token
+        token = new_result_token()
         score_cmd = " ".join(shlex.quote(a) for a in
-                             _score_cmd(self.cfg.python, score_entry, params))
+                             _score_cmd(self.cfg.python, score_entry, params,
+                                        token))
         inner = f"timeout {self.cfg.eval_timeout_s} {score_cmd}"
         lock_wait = self.cfg.eval_timeout_s * 2 + 300
         env_prefix = "".join(f"{k}={shlex.quote(v)} "
@@ -139,7 +142,8 @@ class SSHRunner(Runner):
                 local_result.unlink(missing_ok=True)
                 return parse_result_file(Path("/nonexistent"),
                                          run.render() + "\n" + cat.render())
-            return parse_result_file(local_result, run.render())
+            return verify_token(parse_result_file(local_result, run.render()),
+                                token)
         finally:
             local_result.unlink(missing_ok=True)
 

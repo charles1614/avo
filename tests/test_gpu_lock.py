@@ -17,13 +17,14 @@ INTERVAL_HARNESS = textwrap.dedent("""\
     ap.add_argument("--workspace", required=True)
     ap.add_argument("--params-b64", required=True)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--result-token", default="")
     a = ap.parse_args()
     t0 = time.monotonic()
     time.sleep(0.4)
     t1 = time.monotonic()
     Path(a.out).write_text(json.dumps(
         {"correct": True, "score": 1.0, "error": None,
-         "configs": [{"t0": t0, "t1": t1}], "meta": {}}))
+         "configs": [{"t0": t0, "t1": t1}], "meta": {"result_token": a.result_token}}))
 """)
 
 
@@ -113,10 +114,13 @@ def test_local_runner_pins_device(tmp_path, staged_task):
         "from pathlib import Path\n"
         "ap = argparse.ArgumentParser()\n"
         "ap.add_argument('--workspace'); ap.add_argument('--params-b64')\n"
-        "ap.add_argument('--out'); a = ap.parse_args()\n"
+        "ap.add_argument('--out')\n"
+        "ap.add_argument('--result-token', default='')\n"
+        "a = ap.parse_args()\n"
         "Path(a.out).write_text(json.dumps({'correct': True, 'score': 1.0,\n"
-        "  'error': None, 'configs': [], 'meta': {'seen':\n"
-        "  os.environ.get('CUDA_VISIBLE_DEVICES', 'unset')}}))\n")
+        "  'error': None, 'configs': [], 'meta': {\n"
+        "  'result_token': a.result_token,\n"
+        "  'seen': os.environ.get('CUDA_VISIBLE_DEVICES', 'unset')}}))\n")
     runner = LocalRunner(RunnerConfig(kind="local", cuda_device="5",
                                       gpu_lock="", eval_timeout_s=30))
     r = runner.score(ws, harness, "score.py", {})

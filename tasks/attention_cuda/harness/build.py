@@ -65,10 +65,17 @@ def build(workspace: Path, arch_flags: list[str]):
                                      "~/avo_scratch/build_cache")).expanduser()
     build_dir = build_root / key[:16]
     build_dir.mkdir(parents=True, exist_ok=True)
-    return cpp_extension.load(
-        name=f"avo_attn_{key[:12]}",
-        sources=[str(s) for s in sources],
-        extra_cuda_cflags=cuda_cflags,
-        build_directory=str(build_dir),
-        verbose=True,
-    )
+    # Concurrent routes with identical source share this content-hash dir;
+    # two ninja invocations in one build directory race and can corrupt the
+    # .so. Serialize per hash (flock auto-releases if a builder dies).
+    import fcntl
+    lock_path = build_root / f"{key[:16]}.lock"
+    with open(lock_path, "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        return cpp_extension.load(
+            name=f"avo_attn_{key[:12]}",
+            sources=[str(s) for s in sources],
+            extra_cuda_cflags=cuda_cflags,
+            build_directory=str(build_dir),
+            verbose=True,
+        )

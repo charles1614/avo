@@ -19,6 +19,7 @@ HARNESS = textwrap.dedent("""\
     ap.add_argument("--workspace", required=True)
     ap.add_argument("--params-b64", required=True)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--result-token", default="")
     a = ap.parse_args()
     try:
         value = float((Path(a.workspace) / "value.txt").read_text().strip())
@@ -26,11 +27,11 @@ HARNESS = textwrap.dedent("""\
         payload = {"correct": ok, "score": value if ok else 0.0,
                    "error": None if ok else {"stage": "correctness",
                                              "detail": "negative", "log_tail": ""},
-                   "configs": [{"size": 1, "throughput": value}], "meta": {}}
+                   "configs": [{"size": 1, "throughput": value}], "meta": {"result_token": a.result_token}}
     except Exception as e:
         payload = {"correct": False, "score": 0.0,
                    "error": {"stage": "correctness", "detail": str(e),
-                             "log_tail": ""}, "configs": [], "meta": {}}
+                             "log_tail": ""}, "configs": [], "meta": {"result_token": a.result_token}}
     Path(a.out).write_text(json.dumps(payload))
 """)
 
@@ -162,6 +163,7 @@ PROFILE_HARNESS = textwrap.dedent("""\
     ap.add_argument("--workspace", required=True)
     ap.add_argument("--params-b64", required=True)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--result-token", default="")
     a = ap.parse_args()
     Path(a.out).write_text(json.dumps(
         {"correct": True, "score": 0.0, "error": None, "configs": [],

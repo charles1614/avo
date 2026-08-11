@@ -32,7 +32,11 @@ BUSY_MEMORY_MIB = 1024
 BUSY_UTIL_PCT = 5
 
 
+RESULT_TOKEN = ""
+
+
 def write(out_path: str, payload: dict) -> None:
+    payload.setdefault("meta", {})["result_token"] = RESULT_TOKEN
     Path(out_path).write_text(json.dumps(payload, indent=1))
 
 
@@ -134,7 +138,10 @@ def main() -> None:
     ap.add_argument("--workspace", required=True)
     ap.add_argument("--params-b64", required=True)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--result-token", default="")
     args = ap.parse_args()
+    global RESULT_TOKEN
+    RESULT_TOKEN = args.result_token
     params = {**DEFAULTS, **json.loads(base64.b64decode(args.params_b64))}
 
     try:
@@ -161,7 +168,9 @@ def main() -> None:
     ref_mod = import_from(ref_path, "_reference_problem")
 
     workspace = Path(args.workspace).resolve()
-    sys.path.insert(0, str(workspace))  # candidate's own imports resolve here
+    # APPEND, never insert(0): a workspace file named torch.py/numpy.py would
+    # otherwise shadow the real package for anything imported after this point
+    sys.path.append(str(workspace))
     try:
         cand_mod = import_from(workspace / "model_new.py", "model_new")
         ModelNew = cand_mod.ModelNew
@@ -230,6 +239,29 @@ def main() -> None:
                               int(params["warmup"]), int(params["repeats"]))
     except Exception as e:
         fail(args.out, "bench", f"{type(e).__name__}: {e}", traceback.format_exc())
+        return
+
+    # post-benchmark re-verification with a FRESH input: a model that memoizes
+    # its output would pass the pre-bench trials and then "run" in ~0 ms on the
+    # repeated identical bench calls
+    torch.manual_seed((rng_seed * 7_919 + 31) % (2**31))
+    fresh = [to_cuda(x) for x in ref_mod.get_inputs()]
+    try:
+        with torch.no_grad():
+            r_out, n_out = ref_model(*fresh), new_model(*fresh)
+        rr = r_out if isinstance(r_out, (tuple, list)) else [r_out]
+        nn = n_out if isinstance(n_out, (tuple, list)) else [n_out]
+        for r, n in zip(rr, nn):
+            ok, err = compare_chunked(r, n, tol)
+            if not ok:
+                fail(args.out, "correctness",
+                     f"post-benchmark recheck FAILED (max_abs_err={err:.6f}) — "
+                     "the model returns stale/cached output for new inputs")
+                return
+    except Exception as e:
+        fail(args.out, "correctness",
+             f"post-bench recheck raised: {type(e).__name__}: {e}",
+             traceback.format_exc())
         return
 
     speedup = ref_ms / new_ms if new_ms > 0 else 0.0

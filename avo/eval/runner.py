@@ -6,6 +6,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import secrets
 import shutil
 import subprocess
 import tempfile
@@ -100,9 +101,40 @@ def resolve_python(python: str) -> str:
     return python
 
 
-def _score_cmd(python: str, score_entry: str, params: dict) -> list[str]:
-    return [python, f"harness/{score_entry}", "--workspace", "workspace",
-            "--params-b64", encode_params(params), "--out", "result.json"]
+def new_result_token() -> str:
+    """Per-eval nonce echoed by the harness into its result. Candidate code is
+    loaded IN-PROCESS by the harness (a .so, or model_new.py), so it can write
+    result.json and os._exit(0) before the harness scores it. Requiring the
+    token means a forged result must deliberately scrape argv — an auditable
+    act rather than an accident."""
+    return secrets.token_hex(16)
+
+
+def _score_cmd(python: str, score_entry: str, params: dict,
+               token: str = "") -> list[str]:
+    cmd = [python, f"harness/{score_entry}", "--workspace", "workspace",
+           "--params-b64", encode_params(params), "--out", "result.json"]
+    if token:
+        cmd += ["--result-token", token]
+    return cmd
+
+
+def verify_token(result: ScoreResult, token: str) -> ScoreResult:
+    """Scoring harnesses echo the nonce; a result that claims correctness
+    without it did not come from this harness invocation (forged by in-process
+    candidate code) and is rejected. Non-scoring entries (profile/baselines)
+    don't echo it and carry score 0, so they're passed through as unverified."""
+    if not token:
+        return result
+    got = result.meta.pop("result_token", None)
+    if got == token:
+        return result
+    if result.correct and result.score > 0:
+        return ScoreResult.failure(
+            "harness", "result token missing/mismatched — this result was not "
+            "produced by the harness (possible forged result); score rejected")
+    result.meta["unverified"] = True
+    return result
 
 
 def parse_result_file(path: Path, run_log: str) -> ScoreResult:
@@ -123,11 +155,12 @@ class LocalRunner(Runner):
             staged = Path(td)
             shutil.copytree(workspace, staged / "workspace", ignore=COPY_IGNORE)
             shutil.copytree(harness, staged / "harness", ignore=COPY_IGNORE)
+            token = new_result_token()
             try:
                 with gpu_lock(self.cfg.lock_path(),
                               wait_timeout_s=self.cfg.eval_timeout_s * 2 + 300):
                     res = _run(_score_cmd(resolve_python(self.cfg.python),
-                                          score_entry, params),
+                                          score_entry, params, token),
                                cwd=staged, timeout_s=self.cfg.eval_timeout_s,
                                env_extra=self.cfg.eval_env())
             except TimeoutError as e:
@@ -136,8 +169,9 @@ class LocalRunner(Runner):
                 return ScoreResult.failure(
                     "harness", f"eval timed out after {self.cfg.eval_timeout_s}s",
                     res.render())
-            return parse_result_file(staged / "result.json",
-                                     res.stdout + "\n" + res.stderr)
+            return verify_token(
+                parse_result_file(staged / "result.json",
+                                  res.stdout + "\n" + res.stderr), token)
 
     def run_shell(self, workspace: Path, command: str,
                   timeout_s: int | None = None) -> ShellResult:
