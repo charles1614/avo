@@ -89,6 +89,40 @@ def test_lock_wait_timeout_is_structured_failure(tmp_path):
     t.join()
 
 
+def test_per_device_lock_paths_and_env():
+    a = RunnerConfig(kind="local", cuda_device="0")
+    b = RunnerConfig(kind="local", cuda_device="3")
+    # different GPUs on one node => independent locks (no false serialization)
+    assert a.lock_path() != b.lock_path()
+    assert a.lock_path() == "/tmp/avo_gpu0.lock"
+    assert b.eval_env() == {"CUDA_VISIBLE_DEVICES": "3"}
+    # unset device: single shared lock, no pinning
+    plain = RunnerConfig(kind="local")
+    assert plain.lock_path() == "/tmp/avo_gpu0.lock" and plain.eval_env() == {}
+    # same GPU => same lock (routes sharing a card still serialize)
+    assert RunnerConfig(kind="local", cuda_device="3").lock_path() == b.lock_path()
+    # cache identity must NOT depend on which identical GPU ran it
+    assert a.identity() == b.identity()
+
+
+def test_local_runner_pins_device(tmp_path, staged_task):
+    ws, harness = staged_task
+    probe = harness / "score.py"
+    probe.write_text(
+        "import argparse, json, os\n"
+        "from pathlib import Path\n"
+        "ap = argparse.ArgumentParser()\n"
+        "ap.add_argument('--workspace'); ap.add_argument('--params-b64')\n"
+        "ap.add_argument('--out'); a = ap.parse_args()\n"
+        "Path(a.out).write_text(json.dumps({'correct': True, 'score': 1.0,\n"
+        "  'error': None, 'configs': [], 'meta': {'seen':\n"
+        "  os.environ.get('CUDA_VISIBLE_DEVICES', 'unset')}}))\n")
+    runner = LocalRunner(RunnerConfig(kind="local", cuda_device="5",
+                                      gpu_lock="", eval_timeout_s=30))
+    r = runner.score(ws, harness, "score.py", {})
+    assert r.correct and r.meta["seen"] == "5"
+
+
 def test_ssh_runner_wraps_score_in_flock(tmp_path):
     from avo.eval.ssh_runner import SSHRunner
     from avo.types import ShellResult

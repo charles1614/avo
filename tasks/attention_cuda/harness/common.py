@@ -153,18 +153,26 @@ def _smi(query: str, fields: str) -> list[list[str]]:
 
 
 def gpu_busy_reason() -> str | None:
-    """Refuse to bench only when the GPU is actually doing work: another
-    process holding real memory, or sustained nonzero utilization. Persistent
-    desktop/monitoring daemons with small footprints are fine."""
-    me = str(os.getpid())
-    for row in _smi("compute-apps", "pid,process_name,used_memory"):
-        if len(row) >= 3 and row[0] != me:
-            try:
-                mem = int(row[2])
-            except ValueError:
-                continue
-            if mem >= BUSY_MEMORY_MIB:
-                return (f"process {row[0]} ({row[1]}) holds {mem} MiB on the GPU")
+    """Refuse to bench only when the GPU is actually doing work: foreign
+    memory in use, or sustained nonzero utilization. Persistent desktop /
+    monitoring daemons with small footprints are fine.
+
+    Container-safe: nvidia-smi reports HOST pids while os.getpid() is the
+    namespace pid, so PID comparison marks our OWN process foreign and every
+    eval fails. Use total used memory instead — this guard runs before we
+    allocate anything, so any sizeable usage is genuinely someone else's.
+    (torch's CUDA context is a few hundred MiB, well under the threshold.)
+    """
+    for row in _smi("gpu", "memory.used"):
+        try:
+            used = int(row[0])
+        except (ValueError, IndexError):
+            continue
+        if used >= BUSY_MEMORY_MIB:
+            who = ", ".join(f"{r[1]}({r[2]}MiB)" for r in
+                            _smi("compute-apps", "pid,process_name,used_memory")
+                            if len(r) >= 3) or "unknown process"
+            return f"{used} MiB already in use on this GPU [{who}]"
     utils = []
     for _ in range(2):
         for row in _smi("gpu", "utilization.gpu"):

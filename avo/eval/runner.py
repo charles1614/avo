@@ -39,10 +39,12 @@ class Runner(ABC):
         return self.cfg.identity()
 
 
-def _run(cmd: list[str], cwd: Path | None, timeout_s: int) -> ShellResult:
+def _run(cmd: list[str], cwd: Path | None, timeout_s: int,
+         env_extra: dict | None = None) -> ShellResult:
+    env = {**os.environ, **env_extra} if env_extra else None
     try:
         proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True,
-                              timeout=timeout_s)
+                              timeout=timeout_s, env=env)
         return ShellResult(proc.returncode, proc.stdout, proc.stderr)
     except subprocess.TimeoutExpired as e:
         return ShellResult(-1, _dec(e.stdout), _dec(e.stderr), timed_out=True)
@@ -122,11 +124,12 @@ class LocalRunner(Runner):
             shutil.copytree(workspace, staged / "workspace", ignore=COPY_IGNORE)
             shutil.copytree(harness, staged / "harness", ignore=COPY_IGNORE)
             try:
-                with gpu_lock(self.cfg.gpu_lock,
+                with gpu_lock(self.cfg.lock_path(),
                               wait_timeout_s=self.cfg.eval_timeout_s * 2 + 300):
                     res = _run(_score_cmd(resolve_python(self.cfg.python),
                                           score_entry, params),
-                               cwd=staged, timeout_s=self.cfg.eval_timeout_s)
+                               cwd=staged, timeout_s=self.cfg.eval_timeout_s,
+                               env_extra=self.cfg.eval_env())
             except TimeoutError as e:
                 return ScoreResult.failure("harness", str(e))
             if res.timed_out:

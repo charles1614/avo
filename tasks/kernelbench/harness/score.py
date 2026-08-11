@@ -53,7 +53,6 @@ def import_from(path: Path, name: str):
 
 
 def gpu_busy_reason() -> str | None:
-    import os
     def smi(query, fields):
         try:
             out = subprocess.run(
@@ -63,14 +62,15 @@ def gpu_busy_reason() -> str | None:
         except (FileNotFoundError, subprocess.TimeoutExpired):
             return []
         return [[c.strip() for c in l.split(",")] for l in out.splitlines() if l.strip()]
-    me = str(os.getpid())
-    for row in smi("compute-apps", "pid,process_name,used_memory"):
-        if len(row) >= 3 and row[0] != me:
-            try:
-                if int(row[2]) >= BUSY_MEMORY_MIB:
-                    return f"process {row[0]} ({row[1]}) holds {row[2]} MiB"
-            except ValueError:
-                continue
+    # memory-based, not PID-based: in containers nvidia-smi reports host pids
+    # while os.getpid() is the namespace pid, so PID comparison would flag our
+    # own process as foreign and fail every eval
+    for row in smi("gpu", "memory.used"):
+        try:
+            if int(row[0]) >= BUSY_MEMORY_MIB:
+                return f"{row[0]} MiB already in use on this GPU"
+        except (ValueError, IndexError):
+            continue
     utils = []
     for _ in range(2):
         for row in smi("gpu", "utilization.gpu"):

@@ -138,7 +138,16 @@ each shell inside a bubblewrap namespace that blanks the whole `runs/` tree
 and re-exposes only the calling route's workspace, with a private `/tmp`.
 Install bubblewrap on every GPU host (`apt install bubblewrap`); with it
 absent, `auto` falls back to no isolation and the run prints a loud warning —
-safe for a single route only. `sandbox: bwrap` hard-requires it.
+safe for a single route only. `sandbox: bwrap` hard-requires it. (Ubuntu 24.04
+also needs `sysctl kernel.apparmor_restrict_unprivileged_userns=0`.)
+
+On a **multi-GPU node**, give each route its own card with
+`runner.cuda_device: "0".."7"` — it is exported as `CUDA_VISIBLE_DEVICES` to
+the eval subprocess, and `gpu_lock` defaults to a per-device path
+(`/tmp/avo_gpu{device}.lock`) so routes on different cards never serialize.
+**Kubernetes**: see [docs/kubernetes.md](docs/kubernetes.md) — pod-per-route is
+recommended (the container is the sandbox), and the busy-guard is
+PID-namespace-safe.
 
 ## KernelBench campaigns
 

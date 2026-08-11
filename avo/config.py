@@ -49,7 +49,15 @@ class RunnerConfig(BaseModel):
     # evals (accurate timing, no memory contention) while LLM turns overlap.
     # Same path on all runs sharing the GPU; "" disables. For ssh runners the
     # path is on the remote host (needs util-linux `flock`).
-    gpu_lock: str = "/tmp/avo_gpu.lock"
+    # `{device}` is substituted with cuda_device, so routes on DIFFERENT GPUs
+    # of the same node get independent locks (no false serialization) while
+    # routes sharing a GPU still serialize.
+    gpu_lock: str = "/tmp/avo_gpu{device}.lock"
+    # Which GPU this run's evals use, as an index into the visible devices
+    # ("" = whatever the environment already exposes). Set per route when
+    # several runs share a multi-GPU node/pod; exported as CUDA_VISIBLE_DEVICES
+    # to the eval subprocess, so the harness always sees it as device 0.
+    cuda_device: str = ""
     # Filesystem isolation for agent shell/gpu_shell (bubblewrap). REQUIRED
     # for multi-route integrity — without it agents can read/copy peer routes'
     # workspaces and a shared /tmp. auto = bwrap if it works else none (with a
@@ -57,8 +65,20 @@ class RunnerConfig(BaseModel):
     sandbox: str = "auto"
 
     def identity(self) -> str:
-        """Part of the eval-cache key: same code on a different target != same eval."""
+        """Part of the eval-cache key: same code on a different target != same eval.
+        cuda_device is deliberately EXCLUDED — identical GPUs on one node give
+        interchangeable results, so routes can share cache entries."""
         return f"{self.kind}:{self.host or 'local'}:{' '.join(self.arch_flags)}"
+
+    def lock_path(self) -> str:
+        """gpu_lock with {device} filled in (per-GPU mutex on multi-GPU nodes)."""
+        if not self.gpu_lock:
+            return ""
+        return self.gpu_lock.format(device=self.cuda_device or "0")
+
+    def eval_env(self) -> dict[str, str]:
+        """Extra env for eval/profile subprocesses (GPU pinning)."""
+        return {"CUDA_VISIBLE_DEVICES": self.cuda_device} if self.cuda_device else {}
 
 
 class BudgetConfig(BaseModel):
