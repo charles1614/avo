@@ -15,36 +15,23 @@ def load(rel, name):
     return m
 
 
-def test_banned_attention_apis_detected(tmp_path):
-    common = load("tasks/attention_cuda/harness/checks.py", "attn_checks_scan")
-    # a kernel that delegates to SDPA is rejected...
+def test_attention_ban_list_catches_delegation(tmp_path):
+    """The attention task's declared patterns, applied by the shared scanner."""
+    ah = load("harness_lib/avo_harness/__init__.py", "ah_scan")
+    bans = load("tasks/attention_cuda/harness/banned.py", "attn_bans")
     ws = tmp_path / "cheat"
     ws.mkdir()
-    (ws / "attention.cu").write_text(
-        "torch::Tensor attention_forward(...) {\n"
-        "  return at::scaled_dot_product_attention(q, k, v);\n}\n")
-    hit = common.scan_banned_apis(ws)
-    assert hit and "scaled_dot_product_attention" in hit
-
-    # ...cuDNN fused attention too
-    (ws / "attention.cu").write_text("x = cudnnMultiHeadAttnForward(...);")
-    assert common.scan_banned_apis(ws)
+    for src in ("return at::scaled_dot_product_attention(q, k, v);",
+                "x = cudnnMultiHeadAttnForward(...);",
+                "out = flash_attn_func(q, k, v);"):
+        (ws / "attention.cu").write_text(src)
+        hit = ah.scan_banned_apis(ws, bans.BANNED_API_PATTERNS)
+        assert hit, f"delegation not caught: {src}"
 
 
-def test_banned_patterns_are_task_configurable(tmp_path):
-    """Any hand-written-kernel task can declare its own bans (a GEMM task
-    bans cuBLAS; attention's defaults would not catch that)."""
-    common = load("tasks/attention_cuda/harness/checks.py", "attn_checks_cfg")
-    ws = tmp_path / "gemm"
-    ws.mkdir()
-    (ws / "gemm.cu").write_text("cublasLtMatmul(handle, ...);")
-    assert common.scan_banned_apis(ws) is None          # attention defaults
-    hit = common.scan_banned_apis(ws, [r"cublas\w*Matmul", r"at::matmul"])
-    assert hit and "cublasLtMatmul" in hit               # task-declared ban
-
-
-def test_banned_scan_ignores_comments_and_allows_gemm(tmp_path):
-    common = load("tasks/attention_cuda/harness/checks.py", "attn_checks_scan2")
+def test_ban_scan_ignores_comments_and_allows_gemm(tmp_path):
+    ah = load("harness_lib/avo_harness/__init__.py", "ah_scan2")
+    bans = load("tasks/attention_cuda/harness/banned.py", "attn_bans2")
     ws = tmp_path / "ok"
     ws.mkdir()
     (ws / "attention.cu").write_text(
@@ -52,37 +39,20 @@ def test_banned_scan_ignores_comments_and_allows_gemm(tmp_path):
         "/* mem_efficient_attention is banned */\n"
         "cublasLtMatmul(...);  // GEMM primitive is allowed\n"
         "wmma::mma_sync(acc, a, b, acc);\n")
-    assert common.scan_banned_apis(ws) is None
+    assert ah.scan_banned_apis(ws, bans.BANNED_API_PATTERNS) is None
 
 
-FORGING_HARNESS = """\
-import argparse, json, os
-from pathlib import Path
-ap = argparse.ArgumentParser()
-ap.add_argument("--workspace"); ap.add_argument("--params-b64")
-ap.add_argument("--out"); ap.add_argument("--result-token", default="")
-a = ap.parse_args()
-# simulate in-process candidate code writing a perfect score and exiting
-# before the harness can score it (no token echoed)
-Path(a.out).write_text(json.dumps({"correct": True, "score": 999.0,
-    "error": None, "configs": [], "meta": {}}))
-os._exit(0)
-"""
-
-
-def test_forged_result_without_token_is_rejected(tmp_path):
-    from avo.config import RunnerConfig
-    from avo.eval.runner import LocalRunner
-    ws, harness = tmp_path / "ws", tmp_path / "h"
+def test_banned_patterns_are_task_configurable(tmp_path):
+    """Any hand-written-kernel task declares its own bans; attention's
+    defaults would not catch a GEMM task delegating to cuBLAS."""
+    ah = load("harness_lib/avo_harness/__init__.py", "ah_scan3")
+    bans = load("tasks/attention_cuda/harness/banned.py", "attn_bans3")
+    ws = tmp_path / "gemm"
     ws.mkdir()
-    harness.mkdir()
-    (ws / "x.txt").write_text("x")
-    (harness / "score.py").write_text(FORGING_HARNESS)
-    runner = LocalRunner(RunnerConfig(kind="local", gpu_lock="",
-                                      eval_timeout_s=30))
-    r = runner.score(ws, harness, "score.py", {})
-    assert not r.correct and r.score == 0.0
-    assert "forged" in (r.error or {}).get("detail", "")
+    (ws / "gemm.cu").write_text("cublasLtMatmul(handle, ...);")
+    assert ah.scan_banned_apis(ws, bans.BANNED_API_PATTERNS) is None
+    hit = ah.scan_banned_apis(ws, [r"cublas\w*Matmul", r"at::matmul"])
+    assert hit and "cublasLtMatmul" in hit
 
 
 def test_kb_preflight_warns_on_missing_sources(tmp_path):

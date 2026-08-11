@@ -1,17 +1,19 @@
-"""Shared harness utilities: config grid, FP32 reference (chunked), BF16 error
-floor, CUDA-event timing, TFLOPS accounting, GPU-busy detection.
+"""Attention-specific harness utilities: benchmark grid, FP32/BF16 references,
+the BF16 error floor, and TFLOPS accounting.
 
-All scoring math lives here, outside the agent-writable workspace.
+Generic guards/timing/aggregation come from the shared integrity library and
+are re-exported here for callers (bench_baselines). All scoring math lives
+outside the agent-writable workspace.
 """
 from __future__ import annotations
 
 import math
-import os
-import statistics
-import subprocess
-import time
 
 import torch
+
+# one implementation for every task, staged beside this file
+from avo_harness import (bench_ms, geomean,  # noqa: F401
+                         gpu_busy_reason, gpu_meta, max_abs_err)
 
 DEFAULT_GRID = {"heads": 16, "head_dim": 128, "total_tokens": 8192,
                 "seqlens": [1024, 2048, 4096, 8192], "causal": [False, True],
@@ -107,23 +109,6 @@ def check_config(kernel_fn, cfg: dict, seed: int) -> dict:
             "ok": bool(err <= threshold) and math.isfinite(err)}
 
 
-def bench_ms(fn, warmup: int, repeats: int) -> float:
-    torch.cuda.synchronize()
-    for _ in range(warmup):
-        fn()
-    torch.cuda.synchronize()
-    times = []
-    for _ in range(repeats):
-        start = torch.cuda.Event(enable_timing=True)
-        end = torch.cuda.Event(enable_timing=True)
-        start.record()
-        fn()
-        end.record()
-        torch.cuda.synchronize()
-        times.append(start.elapsed_time(end))
-    return statistics.median(times)
-
-
 def attention_tflops(cfg: dict, ms: float) -> float:
     flops = 4.0 * cfg["batch"] * cfg["heads"] * cfg["seqlen"] ** 2 * cfg["head_dim"]
     if cfg["causal"]:
@@ -131,61 +116,5 @@ def attention_tflops(cfg: dict, ms: float) -> float:
     return flops / (ms * 1e-3) / 1e12
 
 
-def geomean(xs: list[float]) -> float:
-    if not xs or any(x <= 0 for x in xs):
-        return 0.0
-    return math.exp(sum(math.log(x) for x in xs) / len(xs))
 
 
-BUSY_MEMORY_MIB = 1024  # idle desktop/monitoring daemons sit well below this
-BUSY_UTIL_PCT = 5
-
-
-def _smi(query: str, fields: str) -> list[list[str]]:
-    try:
-        out = subprocess.run(
-            ["nvidia-smi", f"--query-{query}={fields}", "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=10).stdout
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return []
-    return [[c.strip() for c in line.split(",")]
-            for line in out.splitlines() if line.strip()]
-
-
-def gpu_busy_reason() -> str | None:
-    """Refuse to bench only when the GPU is actually doing work: foreign
-    memory in use, or sustained nonzero utilization. Persistent desktop /
-    monitoring daemons with small footprints are fine.
-
-    Container-safe: nvidia-smi reports HOST pids while os.getpid() is the
-    namespace pid, so PID comparison marks our OWN process foreign and every
-    eval fails. Use total used memory instead — this guard runs before we
-    allocate anything, so any sizeable usage is genuinely someone else's.
-    (torch's CUDA context is a few hundred MiB, well under the threshold.)
-    """
-    for row in _smi("gpu", "memory.used"):
-        try:
-            used = int(row[0])
-        except (ValueError, IndexError):
-            continue
-        if used >= BUSY_MEMORY_MIB:
-            who = ", ".join(f"{r[1]}({r[2]}MiB)" for r in
-                            _smi("compute-apps", "pid,process_name,used_memory")
-                            if len(r) >= 3) or "unknown process"
-            return f"{used} MiB already in use on this GPU [{who}]"
-    utils = []
-    for _ in range(2):
-        for row in _smi("gpu", "utilization.gpu"):
-            try:
-                utils.append(int(row[0]))
-            except ValueError:
-                pass
-        time.sleep(0.25)
-    if utils and max(utils) > BUSY_UTIL_PCT:
-        return f"GPU utilization at {max(utils)}% before benching"
-    return None
-
-
-def gpu_meta() -> dict:
-    return {"gpu": torch.cuda.get_device_name(0), "torch": torch.__version__,
-            "cuda": torch.version.cuda}

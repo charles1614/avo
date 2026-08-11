@@ -1,41 +1,36 @@
-"""Scoring harness for the sort_py task.
+"""Scoring for the sort_py toy task (CPU-only).
+
+Uses the same shared `avo_harness` sequence as the GPU tasks — result tokens,
+correctness before timing, and the post-benchmark recheck all apply — with
+requires_cuda=False so no GPU guard runs. Task specifics: the banned-construct
+AST check (you must implement the sort, not call the builtin) and elements/sec.
 
 Protocol: python harness/score.py --workspace <dir> --params-b64 <b64> --out result.json
-Never trusts the workspace: bans sorted()/.sort() via AST, checks correctness on
-randomized inputs, then times throughput.
 """
 from __future__ import annotations
 
-import argparse
 import ast
-import base64
 import importlib.util
-import json
-import math
 import random
 import statistics
 import sys
 import time
 from pathlib import Path
 
-DEFAULT_SIZES = [500, 2000, 8000]
-CORRECTNESS_TRIALS = 10
+HARNESS_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(HARNESS_DIR))
+
+import avo_harness as ah  # noqa: E402  (staged beside this file)
+
+DEFAULTS = {"sizes": [500, 2000, 8000]}
 TIMING_REPEATS = 5
-SLOW_SINGLE_RUN_S = 5.0  # if one run is slower than this, skip repeats
-
-
-RESULT_TOKEN = ""
-
-
-def fail(stage: str, detail: str, out_path: str) -> None:
-    result = {"correct": False, "score": 0.0,
-              "error": {"stage": stage, "detail": detail, "log_tail": ""},
-              "configs": [], "meta": {"result_token": RESULT_TOKEN}}
-    Path(out_path).write_text(json.dumps(result, indent=1))
-    sys.exit(0)
+SLOW_SINGLE_RUN_S = 5.0
+BANNED_IMPORT_ROOTS = ("subprocess", "ctypes", "os")
 
 
 def banned_constructs(source: str) -> str | None:
+    """The builtin sort is the thing being optimized: calling it is delegation
+    (this task's analogue of banned_apis)."""
     tree = ast.parse(source)
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
@@ -49,14 +44,13 @@ def banned_constructs(source: str) -> str | None:
             if isinstance(node, ast.ImportFrom) and node.module:
                 names.append(node.module)
             for name in names:
-                root = name.split(".")[0]
-                if root in ("subprocess", "ctypes", "os"):
-                    return f"banned import '{root}' at line {node.lineno}"
+                if name.split(".")[0] in BANNED_IMPORT_ROOTS:
+                    return f"banned import '{name}' at line {node.lineno}"
     return None
 
 
-def load_solution(workspace: Path):
-    path = workspace / "solution.py"
+def load(args: ah.HarnessArgs):
+    path = args.workspace / "solution.py"
     if not path.exists():
         raise FileNotFoundError("solution.py missing from workspace")
     banned = banned_constructs(path.read_text())
@@ -70,81 +64,52 @@ def load_solution(workspace: Path):
     return mod.sort_list
 
 
-def check_correctness(sort_fn, rng: random.Random) -> None:
-    cases = [[], [1], [2, 1], [5, 5, 5]]
-    for _ in range(CORRECTNESS_TRIALS):
-        n = rng.randint(2, 2000)
-        cases.append([rng.randint(-10**6, 10**6) for _ in range(n)])
+def configs(sort_fn, args: ah.HarnessArgs) -> list:
+    return [{"size": n} for n in args.params["sizes"]]
+
+
+def check(sort_fn, cfg: dict, seed: int, args: ah.HarnessArgs) -> dict:
+    rng = random.Random(seed)
+    cases = [[], [1], [2, 1], [5, 5, 5],
+             [rng.randint(-10**6, 10**6) for _ in range(min(cfg["size"], 2000))],
+             [rng.randint(-50, 50) for _ in range(200)]]  # many duplicates
     for case in cases:
         original = list(case)
         got = sort_fn(case)
-        expected = sorted(original)
         if case != original:
-            raise ValueError("input list was mutated")
-        if got != expected:
-            raise ValueError(
-                f"wrong result for n={len(original)}: "
-                f"got[:8]={got[:8] if isinstance(got, list) else type(got)}, "
-                f"expected[:8]={expected[:8]}")
+            return {"ok": False, "detail": "input list was mutated"}
+        if got != sorted(original):
+            return {"ok": False,
+                    "detail": f"wrong result for n={len(original)}: got[:8]="
+                              f"{got[:8] if isinstance(got, list) else type(got)}"}
+    return {"ok": True, "detail": ""}
 
 
-def bench(sort_fn, sizes: list[int], rng: random.Random) -> list[dict]:
-    configs = []
-    for n in sizes:
-        arr = [rng.randint(-10**6, 10**6) for _ in range(n)]
-        times = []
-        for _ in range(TIMING_REPEATS):
-            data = list(arr)
-            t0 = time.perf_counter()
-            sort_fn(data)
-            dt = time.perf_counter() - t0
-            times.append(dt)
-            if dt > SLOW_SINGLE_RUN_S:
-                break
-        median_s = statistics.median(times)
-        configs.append({"size": n, "median_ms": median_s * 1e3,
-                        "throughput": n / median_s / 1e3})  # kElem/s
-    return configs
+def measure(sort_fn, cfg: dict, args: ah.HarnessArgs) -> dict:
+    rng = random.Random(cfg["size"])
+    arr = [rng.randint(-10**6, 10**6) for _ in range(cfg["size"])]
+    times = []
+    for _ in range(TIMING_REPEATS):
+        data = list(arr)
+        t0 = time.perf_counter()
+        sort_fn(data)
+        dt = time.perf_counter() - t0
+        times.append(dt)
+        if dt > SLOW_SINGLE_RUN_S:
+            break
+    median_s = statistics.median(times)
+    kelems = cfg["size"] / median_s / 1e3
+    return {"median_ms": median_s * 1e3, "throughput": kelems,
+            "metric_value": kelems}
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--workspace", required=True)
-    ap.add_argument("--params-b64", required=True)
-    ap.add_argument("--out", required=True)
-    ap.add_argument("--result-token", default="")
-    args = ap.parse_args()
-    global RESULT_TOKEN
-    RESULT_TOKEN = args.result_token
-
-    params = json.loads(base64.b64decode(args.params_b64))
-    sizes = params.get("sizes", DEFAULT_SIZES)
-    rng = random.Random(params.get("rng_seed", random.SystemRandom().randint(0, 2**31)))
-
-    try:
-        sort_fn = load_solution(Path(args.workspace))
-    except (SyntaxError, ValueError, FileNotFoundError, AttributeError, Exception) as e:
-        fail("compile" if isinstance(e, SyntaxError) else "correctness",
-             f"{type(e).__name__}: {e}", args.out)
-        return
-
-    try:
-        check_correctness(sort_fn, rng)
-    except Exception as e:
-        fail("correctness", f"{type(e).__name__}: {e}", args.out)
-        return
-
-    try:
-        configs = bench(sort_fn, sizes, rng)
-        score = math.exp(sum(math.log(c["throughput"]) for c in configs) / len(configs))
-    except Exception as e:
-        fail("bench", f"{type(e).__name__}: {e}", args.out)
-        return
-
-    result = {"correct": True, "score": score, "error": None, "configs": configs,
-              "meta": {"python": sys.version.split()[0], "sizes": sizes,
-                       "result_token": RESULT_TOKEN}}
-    Path(args.out).write_text(json.dumps(result, indent=1))
+    args = ah.parse_args(DEFAULTS)
+    ah.run_scoring(args, ah.ScoringHooks(
+        load=load, configs=configs, check=check, measure=measure,
+        meta=lambda: {"python": sys.version.split()[0],
+                      "sizes": args.params["sizes"]},
+        correctness_trials=3, requires_cuda=False))
 
 
 if __name__ == "__main__":

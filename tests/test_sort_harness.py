@@ -11,19 +11,28 @@ TASK = ROOT / "tasks" / "sort_py"
 
 
 def run_harness(tmp_path, solution_src: str, params: dict | None = None) -> dict:
+    """Stage exactly like the runners do (workspace + pristine harness + the
+    shared avo_harness library) and invoke the harness protocol."""
+    from avo.eval.runner import stage_eval_tree
+
     staged = tmp_path / "staged"
-    (staged / "workspace").mkdir(parents=True)
-    shutil.copytree(TASK / "harness", staged / "harness")
-    (staged / "workspace" / "solution.py").write_text(solution_src)
+    staged.mkdir()
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "solution.py").write_text(solution_src)
+    stage_eval_tree(staged, workspace, TASK / "harness")
     params_b64 = base64.b64encode(
         json.dumps(params or {"sizes": [200, 500], "rng_seed": 42}).encode()
     ).decode()
     proc = subprocess.run(
         [sys.executable, "harness/score.py", "--workspace", "workspace",
-         "--params-b64", params_b64, "--out", "result.json"],
+         "--params-b64", params_b64, "--out", "result.json",
+         "--result-token", "test-token"],
         cwd=staged, capture_output=True, text=True, timeout=120)
     assert proc.returncode == 0, proc.stderr
-    return json.loads((staged / "result.json").read_text())
+    result = json.loads((staged / "result.json").read_text())
+    assert result["meta"]["result_token"] == "test-token"  # framework stamps it
+    return result
 
 
 def test_seed_scores_correct(tmp_path):

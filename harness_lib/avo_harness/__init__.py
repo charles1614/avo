@@ -238,6 +238,7 @@ class ScoringHooks:
     aggregate: Callable[[list], float] | None = None
     meta: Callable[[], dict] = field(default=lambda: {})
     correctness_trials: int = 3
+    requires_cuda: bool = True   # CPU tasks get the same sequence, no GPU guard
 
 
 def run_scoring(args: HarnessArgs, hooks: ScoringHooks) -> None:
@@ -255,17 +256,18 @@ def run_scoring(args: HarnessArgs, hooks: ScoringHooks) -> None:
     A task cannot skip 1, 2, 6 or 7 by forgetting them: they are not its code.
     """
     install_crash_handler(args)
-    try:
-        import torch
-    except ImportError as e:
-        fail(args, "harness", f"torch not importable: {e}")
-        return
-    if not torch.cuda.is_available():
-        fail(args, "harness", "CUDA not available on this host")
-        return
-    if not args.params.get("allow_busy") and (busy := gpu_busy_reason()):
-        fail(args, "harness", f"GPU busy ({busy}); refusing noisy numbers")
-        return
+    if hooks.requires_cuda:
+        try:
+            import torch
+        except ImportError as e:
+            fail(args, "harness", f"torch not importable: {e}")
+            return
+        if not torch.cuda.is_available():
+            fail(args, "harness", "CUDA not available on this host")
+            return
+        if not args.params.get("allow_busy") and (busy := gpu_busy_reason()):
+            fail(args, "harness", f"GPU busy ({busy}); refusing noisy numbers")
+            return
 
     banned = scan_banned_apis(args.workspace, args.params.get("banned_apis"))
     if banned:
@@ -330,5 +332,6 @@ def run_scoring(args: HarnessArgs, hooks: ScoringHooks) -> None:
             return
 
     agg = hooks.aggregate or (lambda rs: geomean([r["metric_value"] for r in rs]))
+    base_meta = gpu_meta() if hooks.requires_cuda else {}
     write_result(args, correct=True, score=agg(rows), configs=rows,
-                 meta={**gpu_meta(), **hooks.meta()})
+                 meta={**base_meta, **hooks.meta()})

@@ -20,15 +20,7 @@ sys.path.insert(0, str(HARNESS_DIR))
 import avo_harness as ah  # noqa: E402  (staged beside this file)
 import build as builder  # noqa: E402
 import common  # noqa: E402
-
-# attention-specific default bans: hand-write the kernel, don't call a fused
-# vendor implementation. GEMM primitives (cuBLAS/CUTLASS) remain allowed.
-DEFAULT_BANNED_APIS = [
-    r"scaled_dot_product_attention",
-    r"cudnnMultiHeadAttn", r"cudnn_attention", r"cudnnAttn", r"cudnnFusedAttn",
-    r"_flash_attention", r"flash_attn_", r"mem_efficient_attention",
-    r"at::native::[A-Za-z_]*attention", r"_scaled_dot_product", r"xformers",
-]
+from banned import BANNED_API_PATTERNS  # noqa: E402
 
 
 def load(args: ah.HarnessArgs):
@@ -67,7 +59,7 @@ def measure(kernel_fn, cfg: dict, args: ah.HarnessArgs) -> dict:
 
 def main() -> None:
     args = ah.parse_args()
-    args.params.setdefault("banned_apis", DEFAULT_BANNED_APIS)
+    args.params.setdefault("banned_apis", BANNED_API_PATTERNS)
     ah.run_scoring(args, ah.ScoringHooks(
         load=load, configs=configs, check=check, measure=measure,
         meta=lambda: {"warmup": args.params.get("warmup",
